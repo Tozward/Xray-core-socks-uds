@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	stdnet "net"
 	"sync"
 
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport"
 )
@@ -17,19 +17,19 @@ import (
 type udpDispatcher struct {
 	sync.RWMutex
 	links      map[net.Destination]*transport.Link
-	writer     *buf.BufferedWriter
+	conn       stdnet.Conn
 	wMutex     sync.Mutex
 	ctx        context.Context
 	cancel     context.CancelFunc
 	disp       routing.Dispatcher
-	clientAddr net.Addr
+	clientAddr stdnet.Addr
 }
 
-func newUDPDispatcher(ctx context.Context, clientAddr net.Addr, writer *buf.BufferedWriter, disp routing.Dispatcher) *udpDispatcher {
+func newUDPDispatcher(ctx context.Context, clientAddr stdnet.Addr, conn stdnet.Conn, disp routing.Dispatcher) *udpDispatcher {
 	c, cancel := context.WithCancel(ctx)
 	return &udpDispatcher{
 		links:      make(map[net.Destination]*transport.Link),
-		writer:     writer,
+		conn:       conn,
 		ctx:        c,
 		cancel:     cancel,
 		disp:       disp,
