@@ -3,7 +3,6 @@ package socks_uds
 import (
 	"context"
 	"io"
-	stdnet "net"
 	"strings"
 
 	"github.com/xtls/xray-core/common"
@@ -12,14 +11,12 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/routing"
-	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/stat"
 )
 
-// newError 生成该协议专属的层级错误信息
-func newError(values ...interface{}) *errors.Error {
-	return errors.New(values...).Path("Proxy", "SocksUDS")
+func newError(values ...interface{}) error {
+	return errors.New(values...)
 }
 
 type Server struct {
@@ -34,14 +31,13 @@ func (s *Server) Network() []net.Network {
 	return []net.Network{net.Network_TCP, net.Network_UNIX}
 }
 
-func (s *Server) Process(ctx context.Context, network net.Network, connection stdnet.Conn, dispatcher routing.Dispatcher) error {
+func (s *Server) Process(ctx context.Context, network net.Network, connection stat.Connection, dispatcher routing.Dispatcher) error {
 	defer connection.Close()
 
-	// 极简 1 字节读取闭包，替代臃肿的 BufferedReader
+	var readBuf [1]byte
 	readByte := func() (byte, error) {
-		var b [1]byte
-		_, err := io.ReadFull(connection, b[:])
-		return b[0], err
+		_, err := io.ReadFull(connection, readBuf[:])
+		return readBuf[0], err
 	}
 
 	// 1. SOCKS5 握手认证
@@ -136,14 +132,18 @@ func (s *Server) Process(ctx context.Context, network net.Network, connection st
 	return newError("unsupported command")
 }
 
-func (s *Server) handleTCP(ctx context.Context, dest net.Destination, connection stdnet.Conn, dispatcher routing.Dispatcher) error {
+func (s *Server) handleTCP(ctx context.Context, dest net.Destination, connection stat.Connection, dispatcher routing.Dispatcher) error {
 	link, err := dispatcher.Dispatch(ctx, dest)
 	if err != nil {
+		// 标准 SOCKS5 失败回复 (0x01: General SOCKS server failure)
+		connection.Write([]byte{0x05, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 		return err
 	}
 	
 	// 立即回吐 TCP 成功包
 	if _, err := connection.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); err != nil {
+		common.Interrupt(link.Reader)
+		common.Interrupt(link.Writer)
 		return err
 	}
 

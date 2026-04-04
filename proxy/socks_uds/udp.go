@@ -37,7 +37,7 @@ func newUDPDispatcher(ctx context.Context, clientAddr stdnet.Addr, conn stdnet.C
 	}
 }
 
-func (d *udpDispatcher) Dispatch(dest net.Destination, payload *buf.Buffer) error {
+func (d *udpDispatcher) Dispatch(dest net.Destination, payload buf.MultiBuffer) error {
 	d.RLock()
 	link, ok := d.links[dest]
 	d.RUnlock()
@@ -65,7 +65,7 @@ func (d *udpDispatcher) Dispatch(dest net.Destination, payload *buf.Buffer) erro
 		d.Unlock()
 	}
 
-	return link.Writer.WriteMultiBuffer(buf.MultiBuffer{payload})
+	return link.Writer.WriteMultiBuffer(payload)
 }
 
 func (d *udpDispatcher) handleDownlink(dest net.Destination, reader buf.Reader) {
@@ -75,89 +75,102 @@ func (d *udpDispatcher) handleDownlink(dest net.Destination, reader buf.Reader) 
 		d.Unlock()
 	}()
 
+	// 优化 1：针对固定的目标地址，在循环外预先计算基础 Header，完全消除循环内因为拼接带来的内存分配
+	var atyp byte
+	var addr []byte
+	if dest.Address.Family().IsIPv4() {
+		atyp = 0x01
+		addr = dest.Address.IP()
+	} else if dest.Address.Family().IsIPv6() {
+		atyp = 0x04
+		addr = dest.Address.IP()
+	} else {
+		atyp = 0x03
+		domain := dest.Address.Domain()
+		addr = append([]byte{byte(len(domain))}, []byte(domain)...)
+	}
+
+	baseHeader := []byte{0x00, 0x00, 0x00, atyp}
+	baseHeader = append(baseHeader, addr...)
+	portBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBuf, uint16(dest.Port))
+	baseHeader = append(baseHeader, portBuf...)
+
+	// 预分配带有长度位（前 2 字节）的头缓冲区，供循环内极速复用
+	hdrBuf := make([]byte, 2+len(baseHeader))
+	copy(hdrBuf[2:], baseHeader)
+
 	for {
 		mb, err := reader.ReadMultiBuffer()
 		if err != nil {
-			return // Dispatcher 已关闭目标地址通道
+			return 
 		}
 
 		d.wMutex.Lock()
-		for _, b := range mb {
-			// SOCKS5 UDP 回包 Header 封装: RSV(2) FRAG(1) ATYP(1) DST.ADDR DST.PORT
-			headerLen := 4
-			var atyp byte
-			var addr []byte
+		for i, b := range mb {
+			totalLen := uint16(len(baseHeader) + int(b.Len()))
+			binary.BigEndian.PutUint16(hdrBuf[:2], totalLen)
 
-			if dest.Address.Family().IsIPv4() {
-				atyp = 0x01
-				addr = dest.Address.IP()
-				headerLen += 4
-			} else if dest.Address.Family().IsIPv6() {
-				atyp = 0x04
-				addr = dest.Address.IP()
-				headerLen += 16
-			} else {
-				atyp = 0x03
-				domain := dest.Address.Domain()
-				addr = append([]byte{byte(len(domain))}, []byte(domain)...)
-				headerLen += 1 + len(domain)
+			// 优化 2：利用 net.Buffers 触发底层 writev 机制（0 次 Payload 拷贝，1 次 Syscall）
+			buffers := stdnet.Buffers{hdrBuf, b.Bytes()}
+			if _, err := buffers.WriteTo(d.conn); err != nil {
+				// 优化 3：检测到写入失败，释放剩余内存并立刻退出，防止 Goroutine 空转泄露
+				for j := i; j < len(mb); j++ {
+					mb[j].Release()
+				}
+				d.wMutex.Unlock()
+				return
 			}
-			headerLen += 2
-
-			totalLen := uint16(headerLen + int(b.Len()))
-
-			// 写入 2 字节长度头 (大端)
-			lenBuf := make([]byte, 2)
-			binary.BigEndian.PutUint16(lenBuf, totalLen)
-			d.writer.Write(lenBuf)
-
-			// 写入 SOCKS5 UDP 头部
-			d.writer.Write([]byte{0x00, 0x00, 0x00, atyp})
-			d.writer.Write(addr)
-			portBuf := make([]byte, 2)
-			binary.BigEndian.PutUint16(portBuf, uint16(dest.Port))
-			d.writer.Write(portBuf)
-
-			// 写入实际 UDP 载荷
-			d.writer.Write(b.Bytes())
-			b.Release() // 处理完毕立即返还内存池
+			b.Release() 
 		}
-		d.writer.Flush()
 		d.wMutex.Unlock()
 	}
 }
 
-func handleUDPOverStream(ctx context.Context, clientAddr net.Addr, reader *buf.BufferedReader, writer *buf.BufferedWriter, dispatcher routing.Dispatcher) error {
-	disp := newUDPDispatcher(ctx, clientAddr, writer, dispatcher)
+func handleUDPOverStream(ctx context.Context, clientAddr stdnet.Addr, conn stdnet.Conn, dispatcher routing.Dispatcher) error {
+	disp := newUDPDispatcher(ctx, clientAddr, conn, dispatcher)
 	defer disp.cancel()
 
+	lenBuf := make([]byte, 2)
 	for {
 		// 1. 读取 2 字节头
-		lenBuf := make([]byte, 2)
-		if _, err := io.ReadFull(reader, lenBuf); err != nil {
+		if _, err := io.ReadFull(conn, lenBuf); err != nil {
 			return err
 		}
 		pktLen := binary.BigEndian.Uint16(lenBuf)
 
-		// 防止异常巨型包打爆 2KB 内建池
+		// Xray 的 UDP 架构硬性限制：单包必须存放在单个 buf.Buffer 内（容量 2KB）。
+		// 遇到超大包不能 return error，否则会切断整条 UDS 流导致断网
 		if int32(pktLen) > buf.Size {
-			return newError("UDP packet too large")
+			// 安全策略：将超大包从流中完整读取并静默丢弃，保持 UDS 字节流边界同步。
+			// (大型 UDP 应当由客户端的 Tun 接口设置 MTU=1500 在 IP 层自动切片解决)
+			if _, err := io.CopyN(io.Discard, conn, int64(pktLen)); err != nil {
+				return err
+			}
+			continue
 		}
 
-		// 2. 读取封包 (直接用内置 Extend 获取切片边界)
+		// 2. 读取封包
 		payload := buf.New()
 		targetBuf := payload.Extend(int32(pktLen))
-		if _, err := io.ReadFull(reader, targetBuf); err != nil {
+		if _, err := io.ReadFull(conn, targetBuf); err != nil {
 			payload.Release()
 			return err
 		}
 
-		// 3. 解析客户端 SOCKS5 UDP Header (RSV + FRAG + ATYP + ADDR + PORT)
+		// 3. 解析客户端 SOCKS5 UDP Header
 		if payload.Len() < 4 {
 			payload.Release()
 			continue
 		}
 		data := payload.Bytes()
+
+		// 标准 SOCKS5 协议规范：如果 FRAG (分片号) 不为 0，且系统不支持组装，必须丢弃
+		if data[2] != 0x00 {
+			payload.Release()
+			continue
+		}
+
 		atyp := data[3]
 		offset := 4
 
@@ -186,8 +199,8 @@ func handleUDPOverStream(ctx context.Context, clientAddr net.Addr, reader *buf.B
 			}
 			dest.Address = net.DomainAddress(string(data[offset : offset+domainLen]))
 			offset += domainLen
-			dest.Port = net.PortFromBytes(data[offset+domainLen : offset+domainLen+2])
-			offset += domainLen + 2
+			dest.Port = net.PortFromBytes(data[offset : offset+2])
+			offset += 2
 		case 0x04: // IPv6
 			if payload.Len() < int32(offset+18) {
 				payload.Release()
@@ -201,12 +214,11 @@ func handleUDPOverStream(ctx context.Context, clientAddr net.Addr, reader *buf.B
 			continue
 		}
 
-		// 裁去解析完的 SOCKS5 UDP Header，仅保留核心载荷移交 Xray 路由
+		// 裁去解析完的 SOCKS5 UDP Header
 		payload.Advance(int32(offset))
 
 		// 4. 交给分发器打到对应的远端 UDP 地址
-		if err := disp.Dispatch(dest, payload); err != nil {
-			newError("failed to dispatch UDP payload").Base(err).WriteToLog(session.ExportIDToError(ctx))
+		if err := disp.Dispatch(dest, buf.MultiBuffer{payload}); err != nil {
 			payload.Release()
 		}
 	}

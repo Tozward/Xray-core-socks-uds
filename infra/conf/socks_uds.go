@@ -2,22 +2,13 @@ package conf
 
 import (
 	"github.com/xtls/xray-core/proxy/socks_uds"
+	"google.golang.org/protobuf/proto"
 )
 
 type SocksUdsServerConfig struct {
-    // 映射 JSON 内该协议可能存在的字段，目前留空即可
+	// 映射 JSON 内该协议可能存在的字段，目前无特殊字段，留空
 }
 
-func (c *SocksUdsServerConfig) Build() (*socks_uds.ServerConfig, error) {
+func (c *SocksUdsServerConfig) Build() (proto.Message, error) {
 	return &socks_uds.ServerConfig{}, nil
-}
-
-func (c *SocksUdsServerConfig) UnmarshalJSON(data []byte) error {
-	return nil
-}
-
-func init() {
-	RegisterInboundConfigCreator("socks_uds", func() Creator {
-		return new(SocksUdsServerConfig)
-	})
 }
