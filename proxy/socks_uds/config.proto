@@ -1,0 +1,10 @@
+syntax = "proto3";
+package xray.proxy.socks_uds;
+option csharp_namespace = "Xray.Proxy.SocksUds";
+option go_package = "github.com/xtls/xray-core/proxy/socks_uds";
+option java_package = "Com.Xray.Proxy.SocksUds";
+option java_multiple_files = true;
+
+message ServerConfig {
+    // 纯本地透明代理节点，暂无需额外鉴权字段
+}
