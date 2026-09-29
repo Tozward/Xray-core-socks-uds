@@ -179,23 +179,21 @@ type VisionReader struct {
 	ctx          context.Context
 	isUplink     bool
 	conn         net.Conn
-	input        *bytes.Reader
-	rawInput     *bytes.Buffer
+	buffers      *VisionBuffers
 	ob           *session.Outbound
 
 	// internal
 	directReadCounter stats.Counter
 }
 
-func NewVisionReader(reader buf.Reader, trafficState *TrafficState, isUplink bool, ctx context.Context, conn net.Conn, input *bytes.Reader, rawInput *bytes.Buffer, ob *session.Outbound) *VisionReader {
+func NewVisionReader(reader buf.Reader, trafficState *TrafficState, isUplink bool, ctx context.Context, conn net.Conn, buffers *VisionBuffers, ob *session.Outbound) *VisionReader {
 	return &VisionReader{
 		Reader:       reader,
 		trafficState: trafficState,
 		ctx:          ctx,
 		isUplink:     isUplink,
 		conn:         conn,
-		input:        input,
-		rawInput:     rawInput,
+		buffers:      buffers,
 		ob:           ob,
 	}
 }
@@ -258,16 +256,17 @@ func (w *VisionReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 
 	if *switchToDirectCopy {
 		// XTLS Vision processes TLS-like conn's input and rawInput
-		if inputBuffer, err := buf.ReadFrom(w.input); err == nil && !inputBuffer.IsEmpty() {
+		if inputBuffer, err := buf.ReadFrom(w.buffers.input); err == nil && !inputBuffer.IsEmpty() {
 			buffer, _ = buf.MergeMulti(buffer, inputBuffer)
 		}
-		if rawInputBuffer, err := buf.ReadFrom(w.rawInput); err == nil && !rawInputBuffer.IsEmpty() {
-			buffer, _ = buf.MergeMulti(buffer, rawInputBuffer)
+		if rawInput := w.buffers.currentRawInput(); rawInput != nil {
+			if rawInputBuffer, err := buf.ReadFrom(rawInput); err == nil && !rawInputBuffer.IsEmpty() {
+				buffer, _ = buf.MergeMulti(buffer, rawInputBuffer)
+			}
+			*rawInput = bytes.Buffer{} // release memory
 		}
-		*w.input = bytes.Reader{} // release memory
-		w.input = nil
-		*w.rawInput = bytes.Buffer{} // release memory
-		w.rawInput = nil
+		*w.buffers.input = bytes.Reader{} // release memory
+		w.buffers = nil
 
 		if inbound := session.InboundFromContext(w.ctx); inbound != nil && inbound.Conn != nil {
 			// if w.isUplink && inbound.CanSpliceCopy == 2 { // TODO: enable uplink splice
