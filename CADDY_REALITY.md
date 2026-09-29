@@ -15,6 +15,10 @@ Xray-core 的 `go.mod` 使用远端 `replace`。编译时无需手动克隆 REAL
 - PR #40 将 REALITY 的 `Config.PrivateKey` 改为 `*ecdh.PrivateKey`。Xray-core 在启动监听时解析一次；无效私钥会报错。
 - 这些修改针对由 Go `crypto/tls` 提供 TLS 的 Caddy 目标。若目标站点实际使用另一种 TLS 栈，先核实其记录行为再复用此分支。
 
+保留握手后记录长度探测，是为了匹配目标站点在 TLS 握手后立即发出的加密记录长度，例如会话票据，以及协商 HTTP/2 后可能发出的 SETTINGS。REALITY 启动时按 SNI 和三种 ALPN 情况探测 Caddy；后续握手读取探测结果并发送相同长度的伪装记录。这与上面的 CCS 容量探测是两项独立机制。它会增加启动时到目标站点的连接；若探测尚未结束，最初的客户端握手也可能等待。若实际探测结果为空，保留它不会发送额外的伪装记录，但仍有启动探测开销。
+
+目前没有你的 Caddy 配置或实测记录，不能断定这项探测对你的站点多余。只有确认使用中的 SNI、ALPN 组合在握手后都不发送这类记录，才适合移除；仅凭 Caddy 使用 Go TLS 或站点由自己管理，无法得出这个结论。
+
 ## 在 macOS 手动编译
 
 前提：已检出 Xray-core 的 `codex/caddy-reality` 分支，使用 Go 1.27 或更新版本，并能下载 `go.mod` 所列依赖。以下命令**现在执行**，工作目录为 Xray-core 仓库根目录：
