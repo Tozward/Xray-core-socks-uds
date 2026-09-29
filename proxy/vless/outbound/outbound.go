@@ -1,12 +1,15 @@
 package outbound
 
 import (
+	"bytes"
 	"context"
 	gotls "crypto/tls"
 	"encoding/base64"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	utls "github.com/refraction-networking/utls"
 	proxymanConfig "github.com/xtls/xray-core/app/proxyman"
@@ -240,7 +243,8 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		Flow: account.Flow,
 	}
 
-	var visionBuffers *proxy.VisionBuffers
+	var input *bytes.Reader
+	var rawInput *bytes.Buffer
 	allowUDP443 := false
 	switch requestAddons.Flow {
 	case vless.XRV + "-udp443":
@@ -257,26 +261,30 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		case protocol.RequestCommandMux:
 			fallthrough // let server break Mux connections that contain TCP requests
 		case protocol.RequestCommandTCP, protocol.RequestCommandRvs:
-			var tlsState any
+			var t reflect.Type
+			var p uintptr
 			if commonConn, ok := conn.(*encryption.CommonConn); ok {
 				if _, ok := commonConn.Conn.(*encryption.XorConn); ok || !proxy.IsRAWTransportWithoutSecurity(iConn) {
 					ob.CanSpliceCopy = 3 // full-random xorConn / non-RAW transport / another securityConn should not be penetrated
 				}
-				tlsState = commonConn
+				t = reflect.TypeOf(commonConn).Elem()
+				p = uintptr(unsafe.Pointer(commonConn))
 			} else if tlsConn, ok := iConn.(*tls.Conn); ok {
-				tlsState = tlsConn.Conn
+				t = reflect.TypeOf(tlsConn.Conn).Elem()
+				p = uintptr(unsafe.Pointer(tlsConn.Conn))
 			} else if utlsConn, ok := iConn.(*tls.UConn); ok {
-				tlsState = utlsConn.Conn
+				t = reflect.TypeOf(utlsConn.Conn).Elem()
+				p = uintptr(unsafe.Pointer(utlsConn.Conn))
 			} else if realityConn, ok := iConn.(*reality.UConn); ok {
-				tlsState = realityConn.Conn
+				t = reflect.TypeOf(realityConn.Conn).Elem()
+				p = uintptr(unsafe.Pointer(realityConn.Conn))
 			} else {
 				return errors.New("XTLS only supports TLS and REALITY directly for now.")
 			}
-			var err error
-			visionBuffers, err = proxy.NewVisionBuffers(tlsState)
-			if err != nil {
-				return err
-			}
+			i, _ := t.FieldByName("input")
+			r, _ := t.FieldByName("rawInput")
+			input = (*bytes.Reader)(unsafe.Pointer(p + i.Offset))
+			rawInput = (*bytes.Buffer)(unsafe.Pointer(p + r.Offset))
 		default:
 			panic("unknown VLESS request command")
 		}
@@ -379,7 +387,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		// default: serverReader := buf.NewReader(conn)
 		serverReader := encoding.DecodeBodyAddons(conn, request, responseAddons)
 		if requestAddons.Flow == vless.XRV {
-			serverReader = proxy.NewVisionReader(serverReader, trafficState, false, ctx, conn, visionBuffers, ob)
+			serverReader = proxy.NewVisionReader(serverReader, trafficState, false, ctx, conn, input, rawInput, ob)
 		}
 		if request.Command == protocol.RequestCommandMux && request.Port == 666 {
 			if requestAddons.Flow == vless.XRV {

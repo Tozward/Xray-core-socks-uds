@@ -4,10 +4,10 @@
 
 | 仓库与分支 | 内容 |
 | --- | --- |
-| [Tozward/REALITY `codex/caddy-records-16`](https://github.com/Tozward/REALITY/tree/codex/caddy-records-16) | 基于 XTLS/REALITY main，合入 [PR #40](https://github.com/XTLS/REALITY/pull/40)，并应用 Caddy 目标站点补丁。 |
+| [Tozward/REALITY `codex/caddy-records-16-official-base`](https://github.com/Tozward/REALITY/tree/codex/caddy-records-16-official-base) | 基于当前 Xray-core 官方锁定的 XTLS/REALITY `8cdf7bf9`，移入 [PR #40](https://github.com/XTLS/REALITY/pull/40)，并应用 Caddy 目标站点补丁。 |
 | [Tozward/Xray-core-socks-uds `codex/caddy-reality`](https://github.com/Tozward/Xray-core-socks-uds/tree/codex/caddy-reality) | 基于 XTLS/Xray-core main，适配 PR #40 的私钥接口，并在 `go.mod` 中固定引用上述 REALITY 分支的具体提交。 |
 
-Xray-core 的 `go.mod` 使用远端 `replace`。编译时无需手动克隆 REALITY；`.local/reality` 是当前机器上用于维护库补丁的独立工作副本，不属于 Xray-core 提交。
+Xray-core 的 `go.mod` 使用远端 `replace`。编译时无需手动克隆 REALITY；`.local/reality-official-base` 是当前机器上用于维护这个分支的独立工作副本，不属于 Xray-core 提交。
 
 ## 定制内容
 
@@ -35,7 +35,7 @@ go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o build_assets/xr
 
 ## 同步上游与审核
 
-**仅作说明**：将来更新时，先在 REALITY 工作副本中同步 `XTLS/REALITY:main`，解决冲突并确认 16 条记录上限及无 CCS 探测仍成立，再推送 `codex/caddy-records-16`。然后将 Xray-core 分支与 `XTLS/Xray-core:main` 同步，把 `go.mod` 的 REALITY 伪版本更新为新提交对应的版本，运行 `go mod tidy`、测试和编译，最后推送 Xray-core 分支。两个仓库的 GitHub 比较页会分别显示各自的改动。
+**仅作说明**：将来更新时，先查看 `XTLS/Xray-core:main` 锁定的 REALITY 提交，再把这个分支同步到该提交；同步时检查 Vision 读取的 `input` 和 `rawInput` 字段布局，确认 16 条记录上限及无 CCS 探测仍成立，再推送 `codex/caddy-records-16-official-base`。然后将 Xray-core 分支与 `XTLS/Xray-core:main` 同步，把 `go.mod` 的 REALITY 伪版本更新为新提交对应的版本，运行 `go mod tidy`、测试和编译，最后推送 Xray-core 分支。两个仓库的 GitHub 比较页会分别显示各自的改动。
 
 若上游合入 PR #40，检查 REALITY 分支和 Xray-core 私钥转换仍与上游接口兼容。更新 REALITY 版本时使用具体提交生成的伪版本，不要改为浮动分支，以保证审核结果和编译产物可复现。
 
