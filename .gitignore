@@ -40,6 +40,9 @@ errorgen
 # Build assets
 /build_assets/
 
+# Local source checkout used to prepare REALITY subtree updates
+/.local/
+
 # Output from dlv test
 **/debug.*
 

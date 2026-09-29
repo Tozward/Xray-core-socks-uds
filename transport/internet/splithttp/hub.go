@@ -548,7 +548,12 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 			}
 		}
 		if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
-			l.listener = goreality.NewListener(l.listener, config.GetREALITYConfig())
+			realityConfig, err := config.GetREALITYConfig()
+			if err != nil {
+				l.listener.Close()
+				return nil, errors.New("invalid REALITY config").Base(err)
+			}
+			l.listener = goreality.NewListener(l.listener, realityConfig)
 		}
 
 		handler.localAddr = l.listener.Addr()

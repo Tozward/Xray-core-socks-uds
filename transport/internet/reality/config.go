@@ -2,6 +2,7 @@ package reality
 
 import (
 	"context"
+	"crypto/ecdh"
 	"io"
 	"net"
 	"os"
@@ -13,7 +14,11 @@ import (
 	"github.com/xtls/xray-core/transport/internet"
 )
 
-func (c *Config) GetREALITYConfig() *reality.Config {
+func (c *Config) GetREALITYConfig() (*reality.Config, error) {
+	privateKey, err := ecdh.X25519().NewPrivateKey(c.PrivateKey)
+	if err != nil {
+		return nil, errors.New("invalid REALITY private key").Base(err)
+	}
 	var dialer net.Dialer
 	config := &reality.Config{
 		DialContext: dialer.DialContext,
@@ -23,7 +28,7 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 		Dest: c.Dest,
 		Xver: byte(c.Xver),
 
-		PrivateKey:   c.PrivateKey,
+		PrivateKey:   privateKey,
 		MinClientVer: c.MinClientVer,
 		MaxClientVer: c.MaxClientVer,
 		MaxTimeDiff:  time.Duration(c.MaxTimeDiff) * time.Millisecond,
@@ -55,7 +60,7 @@ func (c *Config) GetREALITYConfig() *reality.Config {
 	for _, shortId := range c.ShortIds {
 		config.ShortIds[*(*[8]byte)(shortId)] = true
 	}
-	return config
+	return config, nil
 }
 
 func KeyLogWriterFromConfig(c *Config) io.Writer {
