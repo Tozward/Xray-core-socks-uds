@@ -11,7 +11,7 @@ Xray-core 的 `go.mod` 使用远端 `replace`。编译时无需手动克隆 REAL
 
 ## 定制内容
 
-- REALITY 的 `maxUselessRecords` 固定为 16，与本机 Go 1.27.1 的 `crypto/tls` 一致；移除按目标探测 CCS 容量的额外连接、探测报文和动态上限。握手后记录长度探测仍保留。
+- REALITY 的 `maxUselessRecords` 固定为 16。这是连续未推进 TLS 记录的容忍上限，不是单条记录的长度，也不是正常握手会发送的记录数。2026-10-11 核对的目标 Caddy v2.11.4 二进制由 Go 1.27.0 构建，其标准 `crypto/tls` 使用同一上限。这样可避免此项异常输入行为与目标不同，但没有证据表明将 32 改为 16 会改善正常流量吞吐。移除按目标探测 CCS 容量的额外连接、探测报文和动态上限；握手后记录长度探测仍保留。升级 Caddy 或 Go 时需要重新核对。
 - PR #40 将 REALITY 的 `Config.PrivateKey` 改为 `*ecdh.PrivateKey`。Xray-core 在启动监听时解析一次；无效私钥会报错。
 - 这些修改针对由 Go `crypto/tls` 提供 TLS 的 Caddy 目标。若目标站点实际使用另一种 TLS 栈，先核实其记录行为再复用此分支。
 
@@ -38,5 +38,7 @@ go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o build_assets/xr
 **仅作说明**：将来更新时，先查看 `XTLS/Xray-core:main` 锁定的 REALITY 提交，再把这个分支同步到该提交；同步时检查 Vision 读取的 `input` 和 `rawInput` 字段布局，确认 16 条记录上限及无 CCS 探测仍成立，再推送 `codex/caddy-records-16-official-base`。然后将 Xray-core 分支与 `XTLS/Xray-core:main` 同步，把 `go.mod` 的 REALITY 伪版本更新为新提交对应的版本，运行 `go mod tidy`、测试和编译，最后推送 Xray-core 分支。两个仓库的 GitHub 比较页会分别显示各自的改动。
 
 若上游合入 PR #40，检查 REALITY 分支和 Xray-core 私钥转换仍与上游接口兼容。更新 REALITY 版本时使用具体提交生成的伪版本，不要改为浮动分支，以保证审核结果和编译产物可复现。
+
+Vision 通过反射偏移和 `unsafe` 读取 REALITY `Conn` 的私有 `input`、`rawInput` 字段。当前固定依赖的 `rawInput` 是 `bytes.Buffer` 值；REALITY 上游后续提交 `3c98159` 将它改为指针，直接更新依赖会破坏这个约定。`transport/internet/reality/vision_layout_test.go` 是更新依赖前的回归门禁；测试通过也不能替代真实 Vision 流量与内存验证。
 
 本地 `origin` 指向各自的 Tozward fork，`upstream` 指向各自的 XTLS 仓库。Xray-core fork 原有的 `main` 未改动。
