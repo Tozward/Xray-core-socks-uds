@@ -4,7 +4,7 @@
 
 | 仓库与分支 | 内容 |
 | --- | --- |
-| [Tozward/REALITY `codex/caddy-records-16-official-base`](https://github.com/Tozward/REALITY/tree/codex/caddy-records-16-official-base) | 基于当前 Xray-core 官方锁定的 XTLS/REALITY `8cdf7bf9`，移入 [PR #40](https://github.com/XTLS/REALITY/pull/40)，并应用 Caddy 目标站点补丁。 |
+| [Tozward/REALITY `codex/caddy-records-16-official-base`](https://github.com/Tozward/REALITY/tree/codex/caddy-records-16-official-base) | 2026-10-15 同步 XTLS/REALITY main `83f6217`，固定提交 `19a3b88`；[PR #40](https://github.com/XTLS/REALITY/pull/40) 已由官方合入，保留 Caddy 目标站点补丁。 |
 | [Tozward/Xray-core-socks-uds `codex/caddy-reality`](https://github.com/Tozward/Xray-core-socks-uds/tree/codex/caddy-reality) | 基于 XTLS/Xray-core main，适配 PR #40 的私钥接口，并在 `go.mod` 中固定引用上述 REALITY 分支的具体提交。 |
 
 Xray-core 的 `go.mod` 使用远端 `replace`。编译时无需手动克隆 REALITY；`.local/reality-official-base` 是当前机器上用于维护这个分支的独立工作副本，不属于 Xray-core 提交。
@@ -27,7 +27,7 @@ Xray-core 的 `go.mod` 使用远端 `replace`。编译时无需手动克隆 REAL
 go version
 go mod download
 go test ./transport/internet/reality ./transport/internet/tcp ./transport/internet/splithttp ./transport/internet/grpc
-go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o build_assets/xray-caddy ./main
+go build -trimpath -buildvcs=false -pgo=off -ldflags='-s -w -buildid=' -o build_assets/xray-caddy ./main
 ./build_assets/xray-caddy version
 ```
 
@@ -39,6 +39,8 @@ go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o build_assets/xr
 
 若上游合入 PR #40，检查 REALITY 分支和 Xray-core 私钥转换仍与上游接口兼容。更新 REALITY 版本时使用具体提交生成的伪版本，不要改为浮动分支，以保证审核结果和编译产物可复现。
 
-Vision 通过反射偏移和 `unsafe` 读取 REALITY `Conn` 的私有 `input`、`rawInput` 字段。当前固定依赖的 `rawInput` 是 `bytes.Buffer` 值；REALITY 上游后续提交 `3c98159` 将它改为指针，直接更新依赖会破坏这个约定。`transport/internet/reality/vision_layout_test.go` 是更新依赖前的回归门禁；测试通过也不能替代真实 Vision 流量与内存验证。
+Vision 通过反射偏移和 `unsafe` 读取 REALITY `Conn` 的私有 `input`、`rawInput` 字段。旧依赖 `246bd8a` 的 `rawInput` 是 `bytes.Buffer` 值；本次同步包含的上游提交 `3c98159` 将它改为可空、会在 TLS 读取时替换的 `*bytes.Buffer`。`proxy/vision_buffers.go` 同时支持值和指针布局，并在实际切换到直通时读取当前指针，避免持有已归还缓冲池的旧缓冲区。`transport/internet/reality/vision_layout_test.go` 检查固定依赖的字段类型，`proxy/vision_buffers_test.go` 验证实际 Vision 切换；测试通过也不能替代真实客户端流量与内存验证。
+
+2026-10-15 的服务器候选使用 Go 1.27.2、`GOOS=linux`、`GOARCH=amd64`、`GOAMD64=v3`、`CGO_ENABLED=0`、默认内联和 `-pgo=off`。现有 `/Users/arthur/Downloads/default.pgo` 的内部采样时间为 2025-07-20，不能视为针对本次依赖和 Vision 路径的性能证明；旧 PGO 版本仅作实验对照。没有代表性服务器基准前，不将任何候选称为绝对最快版本。
 
 本地 `origin` 指向各自的 Tozward fork，`upstream` 指向各自的 XTLS 仓库。Xray-core fork 原有的 `main` 未改动。

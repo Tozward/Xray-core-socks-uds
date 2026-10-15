@@ -1,16 +1,13 @@
 package inbound
 
 import (
-	"bytes"
 	"context"
 	gotls "crypto/tls"
 	"encoding/base64"
 	"io"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/app/reverse"
@@ -547,8 +544,7 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 		// Flow: requestAddons.Flow,
 	}
 
-	var input *bytes.Reader
-	var rawInput *bytes.Buffer
+	var visionBuffers *proxy.VisionBuffers
 	switch requestAddons.Flow {
 	case vless.XRV:
 		if account.Flow == requestAddons.Flow {
@@ -560,30 +556,27 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 				inbound.CanSpliceCopy = 3
 				fallthrough // we will break Mux connections that contain TCP requests
 			case protocol.RequestCommandTCP:
-				var t reflect.Type
-				var p uintptr
+				var tlsState any
 				if commonConn, ok := connection.(*encryption.CommonConn); ok {
 					if _, ok := commonConn.Conn.(*encryption.XorConn); ok || !proxy.IsRAWTransportWithoutSecurity(iConn) {
 						inbound.CanSpliceCopy = 3 // full-random xorConn / non-RAW transport / another securityConn should not be penetrated
 					}
-					t = reflect.TypeOf(commonConn).Elem()
-					p = uintptr(unsafe.Pointer(commonConn))
+					tlsState = commonConn
 				} else if tlsConn, ok := iConn.(*tls.Conn); ok {
 					if tlsConn.ConnectionState().Version != gotls.VersionTLS13 {
 						return errors.New(`failed to use `+requestAddons.Flow+`, found outer tls version `, tlsConn.ConnectionState().Version)
 					}
-					t = reflect.TypeOf(tlsConn.Conn).Elem()
-					p = uintptr(unsafe.Pointer(tlsConn.Conn))
+					tlsState = tlsConn.Conn
 				} else if realityConn, ok := iConn.(*reality.Conn); ok {
-					t = reflect.TypeOf(realityConn.Conn).Elem()
-					p = uintptr(unsafe.Pointer(realityConn.Conn))
+					tlsState = realityConn.Conn
 				} else {
 					return errors.New("XTLS only supports TLS and REALITY directly for now.")
 				}
-				i, _ := t.FieldByName("input")
-				r, _ := t.FieldByName("rawInput")
-				input = (*bytes.Reader)(unsafe.Pointer(p + i.Offset))
-				rawInput = (*bytes.Buffer)(unsafe.Pointer(p + r.Offset))
+				var err error
+				visionBuffers, err = proxy.NewVisionBuffers(tlsState)
+				if err != nil {
+					return err
+				}
 			}
 		} else {
 			return errors.New("account " + account.ID.String() + " is not able to use the flow " + requestAddons.Flow)
@@ -612,7 +605,7 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	trafficState := proxy.NewTrafficState(userSentID)
 	clientReader := encoding.DecodeBodyAddons(reader, request, requestAddons)
 	if requestAddons.Flow == vless.XRV {
-		clientReader = proxy.NewVisionReader(clientReader, trafficState, true, ctx, connection, input, rawInput, nil)
+		clientReader = proxy.NewVisionReader(clientReader, trafficState, true, ctx, connection, visionBuffers, nil)
 	}
 
 	bufferWriter := buf.NewBufferedWriter(buf.NewWriter(connection))

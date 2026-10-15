@@ -14,7 +14,7 @@ func TestVisionConnBufferLayout(t *testing.T) {
 	connType := reflect.TypeOf(goreality.Conn{})
 	for name, want := range map[string]reflect.Type{
 		"input":    reflect.TypeOf(bytes.Reader{}),
-		"rawInput": reflect.TypeOf(bytes.Buffer{}),
+		"rawInput": reflect.TypeOf((*bytes.Buffer)(nil)),
 	} {
 		field, ok := connType.FieldByName(name)
 		if !ok {
