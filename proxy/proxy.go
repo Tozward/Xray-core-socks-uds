@@ -263,7 +263,7 @@ func (w *VisionReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 			if rawInputBuffer, err := buf.ReadFrom(rawInput); err == nil && !rawInputBuffer.IsEmpty() {
 				buffer, _ = buf.MergeMulti(buffer, rawInputBuffer)
 			}
-			*rawInput = bytes.Buffer{} // release memory
+			// TLS owns this buffer and may return it to a pool after handoff.
 		}
 		*w.buffers.input = bytes.Reader{} // release memory
 		w.buffers = nil

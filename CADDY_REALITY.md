@@ -44,3 +44,19 @@ Vision 通过反射偏移和 `unsafe` 读取 REALITY `Conn` 的私有 `input`、
 2026-10-15 的服务器候选使用 Go 1.27.2、`GOOS=linux`、`GOARCH=amd64`、`GOAMD64=v3`、`CGO_ENABLED=0`、默认内联和 `-pgo=off`。现有 `/Users/arthur/Downloads/default.pgo` 的内部采样时间为 2025-07-20，不能视为针对本次依赖和 Vision 路径的性能证明；旧 PGO 版本仅作实验对照。没有代表性服务器基准前，不将任何候选称为绝对最快版本。
 
 本地 `origin` 指向各自的 Tozward fork，`upstream` 指向各自的 XTLS 仓库。Xray-core fork 原有的 `main` 未改动。
+
+## 2026-10-17 同步与定制审计
+
+本次将 XTLS/Xray-core main 同步至 `0f127f934c6d7c10e4bb6acbe98033db9e5fd922`，包含此前基线之后的 9 个提交。XTLS/REALITY main 当前仍为 `83f621788ca88b83179810b12baa7ae518aacb83`；定制提交 `19a3b88e5b2a38c15e7bb8dde7aa2b3defe33a38` 已包含该提交，因此固定模块版本无需改变。Tozward/REALITY 的默认 `main` 原停留在 `3c98159`，本次已快进至官方 `83f6217`；Caddy 补丁继续维护在 `codex/caddy-records-16-official-base`。
+
+相对上述官方基线，实际保留的运行时代码差异为：
+
+- REALITY：连续未推进 TLS 记录上限固定为 16，移除 CCS 容量探测及动态上限。握手后记录长度探测保留。该部分仍只涉及 `common.go`、`conn.go`、`record_detect.go`、`tls.go`。
+- Xray-core：固定引用上述 REALITY fork；无效 X25519 私钥和 ML-DSA-65 seed 返回带上下文的错误，TCP、gRPC 和 XHTTP 监听入口传播错误并处理已创建的监听资源。私钥预解析接口本身已经由官方实现，不能继续将其全部视为独有功能。
+- Vision：官方 `0f127f93` 已实现值/指针两种 `rawInput` 布局兼容。本地保留的额外防护是严格的直接字段类型检查、错误返回、持有连接引用，以及在直传切换时读取当前缓冲指针。本次采纳官方缓冲生命周期修正：排空 TLS 持有的 raw buffer 后不清零其存储，由 TLS 自身管理缓冲池；对应回归测试也验证缓冲容量未被破坏。
+
+其余差异是回归测试、本文和本地工作副本的忽略规则。当前 `proxy/socks` 与官方代码一致，没有额外 SOCKS UDS 补丁；仓库名称不能作为存在这项定制的依据。
+
+服务器构建沿用 Go 1.27.2、`GOOS=linux`、`GOARCH=amd64`、`GOAMD64=v3`、`CGO_ENABLED=0`、`-trimpath`、`-buildvcs=false` 和官方发布使用的 `-gcflags="all=-l=4"`，PGO 输入固定为 2026-10-17 采集的 CPU profile，SHA256 为 `0beddc0d1c1bbab3ff2f60ba955a9a24ebe488bec36c3b51ef6bcf4abb326358`。该样本来自前一生产版本，属于 Go 支持的跨版本 PGO 使用方式；此次尚无相同负载下的性能对照，不能据此断言吞吐提升或绝对最优。
+
+合并后的相关传输测试和官方 `infra/vformat` 格式检查通过。实现沿用仓库现有错误包装与监听清理方式，但独立审查和测试不能等同于官方维护者认可或生产稳定性证明。Vision 仍依赖 TLS 私有字段与 `unsafe`；REALITY 继承的目标探测等待及畸形输入处理风险也没有在本次同步中另行修复。

@@ -174,11 +174,15 @@ func TestVisionReaderSwitchDrainsCurrentTLSBuffers(t *testing.T) {
 				t.Cleanup(func() { client.Close(); peer.Close() })
 				rawConn := &visionBufferRawConn{Conn: client, reader: bytes.NewReader([]byte(tail))}
 				readCalls := 0
+				rawCapacity := 0
 				tlsReader := visionBufferReadFunc(func() (buf.MultiBuffer, error) {
 					readCalls++
 					// The final TLS Read can replace/release rawInput after the
 					// VisionReader has already captured the connection layout.
 					duringTLSRead()
+					if current != nil {
+						rawCapacity = current.Cap()
+					}
 					input.Reset(pending)
 					frame := append([]byte(nil), userUUID...)
 					frame = append(frame, 2, 0, byte(len(decrypted)), 0, 3)
@@ -202,8 +206,8 @@ func TestVisionReaderSwitchDrainsCurrentTLSBuffers(t *testing.T) {
 					t.Fatalf("switch delivered the wrong pending data or order: got %d bytes, want %d", len(actual), len(want))
 				}
 				checkLayout()
-				if input.Len() != 0 || input.Size() != 0 || (current != nil && (current.Len() != 0 || current.Cap() != 0)) {
-					t.Fatal("TLS input was drained but its backing storage was not released")
+				if input.Len() != 0 || input.Size() != 0 || (current != nil && (current.Len() != 0 || current.Cap() != rawCapacity)) {
+					t.Fatal("TLS input was not drained or the TLS-owned buffer storage was changed")
 				}
 				if reader.buffers != nil || !rawConn.closeNotifySuppressed {
 					t.Fatal("Vision did not finish handing the connection over to direct reading")
