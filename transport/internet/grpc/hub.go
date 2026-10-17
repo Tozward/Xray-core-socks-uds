@@ -80,14 +80,6 @@ func Listen(ctx context.Context, address net.Address, port net.Port, settings *i
 	}
 
 	config := tls.ConfigFromStreamSettings(settings)
-	var realityConfig *goreality.Config
-	if config := reality.ConfigFromStreamSettings(settings); config != nil {
-		var err error
-		realityConfig, err = config.GetREALITYConfig()
-		if err != nil {
-			return nil, errors.New("invalid REALITY config").Base(err)
-		}
-	}
 
 	var options []grpc.ServerOption
 	var s *grpc.Server
@@ -131,8 +123,8 @@ func Listen(ctx context.Context, address net.Address, port net.Port, settings *i
 		errors.LogDebug(ctx, "gRPC listen for service name `"+grpcSettings.getServiceName()+"` tun `"+grpcSettings.getTunStreamName()+"` multi tun `"+grpcSettings.getTunMultiStreamName()+"`")
 		encoding.RegisterGRPCServiceServerX(s, listener, grpcSettings.getServiceName(), grpcSettings.getTunStreamName(), grpcSettings.getTunMultiStreamName())
 
-		if realityConfig != nil {
-			streamListener = goreality.NewListener(streamListener, realityConfig)
+		if config := reality.ConfigFromStreamSettings(settings); config != nil {
+			streamListener = goreality.NewListener(streamListener, config.GetREALITYConfig())
 		}
 		if err = s.Serve(streamListener); err != nil {
 			errors.LogInfoInner(ctx, err, "Listener for gRPC ended")

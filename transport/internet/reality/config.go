@@ -14,11 +14,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet"
 )
 
-func (c *Config) GetREALITYConfig() (*reality.Config, error) {
-	privateKey, err := ecdh.X25519().NewPrivateKey(c.PrivateKey)
-	if err != nil {
-		return nil, errors.New("invalid REALITY private key").Base(err)
-	}
+func (c *Config) GetREALITYConfig() *reality.Config {
 	var dialer net.Dialer
 	config := &reality.Config{
 		DialContext: dialer.DialContext,
@@ -28,7 +24,6 @@ func (c *Config) GetREALITYConfig() (*reality.Config, error) {
 		Dest: c.Dest,
 		Xver: byte(c.Xver),
 
-		PrivateKey:   privateKey,
 		MinClientVer: c.MinClientVer,
 		MaxClientVer: c.MaxClientVer,
 		MaxTimeDiff:  time.Duration(c.MaxTimeDiff) * time.Millisecond,
@@ -38,9 +33,13 @@ func (c *Config) GetREALITYConfig() (*reality.Config, error) {
 
 		KeyLogWriter: KeyLogWriterFromConfig(c),
 	}
+	var err error
+	if config.PrivateKey, err = ecdh.X25519().NewPrivateKey(c.PrivateKey); err != nil {
+		panic(err)
+	}
 	if c.Mldsa65Seed != nil {
 		if config.Mldsa65Key, err = mldsa.NewPrivateKey(mldsa.MLDSA65(), c.Mldsa65Seed); err != nil {
-			return nil, errors.New("invalid REALITY ML-DSA-65 seed").Base(err)
+			panic(err)
 		}
 	}
 	if c.LimitFallbackUpload != nil {
@@ -61,7 +60,7 @@ func (c *Config) GetREALITYConfig() (*reality.Config, error) {
 	for _, shortId := range c.ShortIds {
 		config.ShortIds[*(*[8]byte)(shortId)] = true
 	}
-	return config, nil
+	return config
 }
 
 func KeyLogWriterFromConfig(c *Config) io.Writer {
