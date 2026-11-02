@@ -423,3 +423,51 @@ The re-audit reproduced and corrected two local integration boundaries:
   the final ACK. Other dead connections, full Splice, CloseWrite and original
   socket ownership retain their prior behavior. The exact pinned dependency is
   `395f9425830a9991450bd0b26b54ecd5be80e647`.
+
+### Matched TLS control results
+
+[Run 41473742626](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41473742626)
+verifies 9 cases / 27 uninstrumented rows and separate CPU diagnostics at source
+`f4b170c30b4d8e7e0df04ff6794ceaca6d8cac12`. Production source is identical to
+`f9a1f8e4a9cdf7dc0a939b7732f339550bc8e0cb`; the later commit only fixes exact
+benchmark selection and validates every row's identity. Failed run 41472336035
+is excluded: an unanchored `freedom` selector also matched `freedom_tls13`.
+
+All controls use native bidirectional handoff + local jumbo, MTU 9000,
+GOMAXPROCS=4, Go 1.27.3, one AMD EPYC 9V74 runner. The earlier complete matrix used
+EPYC 7763; these absolute values must not be compared across runs as a code speedup.
+Values are medians of three two-second samples. One-way operations transfer 4 MiB;
+duplex transfers 4 MiB up and its 4 MiB echo, reporting aggregate throughput.
+
+| Workload | Plain TCP MB/s | Direct application TLS1.3 MB/s | Vision with the same application TLS1.3 MB/s |
+| --- | ---: | ---: | ---: |
+| Upload | 1689.84 | 933.24 | 754.99 |
+| Download | 2287.29 | 904.61 | 842.92 |
+| Duplex | 1927.61 | 1328.02 | 1333.56 |
+
+| Workload | Direct TLS CPU ms/op | Vision CPU ms/op |
+| --- | ---: | ---: |
+| Upload | 7.900 | 9.499 |
+| Download | 7.731 | 8.193 |
+| Duplex | 18.180 | 22.000 |
+
+The TLS duplex throughput ranges overlap (1297.45–1332.00 and
+1301.91–1334.02 MB/s); the 0.42% median difference establishes no advantage.
+Vision still uses 21.0% more whole-process duplex CPU. Its matched one-way upload
+and download are 19.1% and 6.8% slower. Thus the original plain-TCP/Vision gap is
+not a measurement of native-integration loss, while Vision also is not cost-free.
+CPU includes application endpoints and the simulated remote Xray node.
+
+Every enabled native direction reports the entire bulk payload; TLS duplex
+reports 4199936 raw bytes per direction per operation. No fallback or incomplete
+handoff was observed. All cases emit a 53740-byte jumbo during the separate
+warmup probe. Bulk VisionWriter/GoConn.Read client-copy stacks are absent from
+the steady-state CPU samples. The remaining server upload path
+`freedom -> CopyRawUplink -> buf.Copy -> writev` accounts for 5.84% of the Vision
+duplex CPU samples. This is a separate server-side optimization candidate;
+that cumulative sample share cannot predict a throughput improvement.
+
+The production corrections retain original server forwarding and protocol
+readiness. Further server splice/batching work requires its own controlled
+experiment and framing, statistics and lifetime review. This audit does not
+expand those upstream paths immediately before Android production testing.
