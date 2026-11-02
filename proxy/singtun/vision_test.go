@@ -60,7 +60,7 @@ type visionServerResult struct {
 	Err     error
 }
 
-func visionCoreConfig(t testing.TB) *visionFixture {
+func visionCoreConfig(t testing.TB, application ...func(net.Conn) (int64, error)) *visionFixture {
 	t.Helper()
 	ca, outerCert, outerKey, innerCert, innerKey := visionCertificates(t)
 	innerPair, err := tls.X509KeyPair(innerCert, innerKey)
@@ -69,7 +69,7 @@ func visionCoreConfig(t testing.TB) *visionFixture {
 	}
 	innerPort, results := visionTLSServer(t, &tls.Config{
 		Certificates: []tls.Certificate{innerPair}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13,
-	})
+	}, application...)
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(ca) {
 		t.Fatal("cannot load test CA")
@@ -191,7 +191,7 @@ func visionCertificates(t testing.TB) (caPEM, outerCert, outerKey, innerCert, in
 	return
 }
 
-func visionTLSServer(t testing.TB, config *tls.Config) (int, <-chan visionServerResult) {
+func visionTLSServer(t testing.TB, config *tls.Config, application ...func(net.Conn) (int64, error)) (int, <-chan visionServerResult) {
 	t.Helper()
 	listener, err := tls.Listen("tcp4", "127.0.0.1:0", config)
 	if err != nil {
@@ -228,9 +228,13 @@ func visionTLSServer(t testing.TB, config *tls.Config) (int, <-chan visionServer
 				result.Err = tlsConn.Handshake()
 				if result.Err == nil {
 					result.Version = tlsConn.ConnectionState().Version
-					result.Bytes, result.Err = io.Copy(tlsConn, tlsConn)
-					if result.Err == nil {
-						_, result.Err = io.WriteString(tlsConn, visionCloseReply)
+					if len(application) != 0 {
+						result.Bytes, result.Err = application[0](tlsConn)
+					} else {
+						result.Bytes, result.Err = io.Copy(tlsConn, tlsConn)
+						if result.Err == nil {
+							_, result.Err = io.WriteString(tlsConn, visionCloseReply)
+						}
 					}
 					if result.Err == nil {
 						result.Err = tlsConn.CloseWrite()

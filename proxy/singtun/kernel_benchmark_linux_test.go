@@ -11,6 +11,11 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"runtime"
+	"runtime/pprof"
+	"runtime/trace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +40,8 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
+
+const kernelBenchmarkPayloadSize = 4 << 20
 
 // BenchmarkKernelNativeEchoDuplex measures steady-state, single-connection
 // IPv4 application echo over an actual Linux TUN at each named MTU. SetBytes counts upload
@@ -62,7 +69,7 @@ func BenchmarkKernelNativeEchoDuplex(b *testing.B) {
 				b.Run(fmt.Sprintf("mtu_%d", mtu), func(b *testing.B) {
 					for _, mode := range []string{"hev_android_defaults", "hev_no_jumbo", "socks_full_splice", "native_read_write", "native_download_splice"} {
 						b.Run(mode, func(b *testing.B) {
-							benchmarkKernelEchoMode(b, mode, mtu, proto.Clone(config).(*core.Config), port, applicationTLS)
+							benchmarkKernelEchoMode(b, mode, "duplex", mtu, proto.Clone(config).(*core.Config), port, applicationTLS)
 						})
 					}
 				})
@@ -71,7 +78,56 @@ func BenchmarkKernelNativeEchoDuplex(b *testing.B) {
 	}
 }
 
-func benchmarkKernelEchoMode(b *testing.B, mode string, mtu int, config *core.Config, port int, applicationTLS *tls.Config) {
+// BenchmarkKernelNativeProfile is a manual diagnostic matrix. The ordinary CI
+// selects BenchmarkKernelNativeEchoDuplex explicitly, keeping its 60-row baseline.
+// One-way cases count only their bulk direction; the one-byte command/completion
+// messages are excluded from SetBytes. Profiling is opt-in and starts after warmup.
+func BenchmarkKernelNativeProfile(b *testing.B) {
+	for _, transport := range []string{"freedom", "vision_tls13"} {
+		b.Run(transport, func(b *testing.B) {
+			for _, workload := range []string{"duplex", "upload", "download"} {
+				b.Run(workload, func(b *testing.B) {
+					b.StopTimer()
+					config := memoryCoreConfig(nil)
+					var applicationTLS *tls.Config
+					var application []func(net.Conn) (int64, error)
+					if workload != "duplex" {
+						application = append(application, func(conn net.Conn) (int64, error) {
+							return benchmarkKernelOneWayServer(conn, workload)
+						})
+					}
+					var port int
+					if transport == "vision_tls13" {
+						fixture := visionCoreConfig(b, application...)
+						config, applicationTLS, port = fixture.Config, fixture.ClientTLS, int(fixture.Target.Port())
+					} else if len(application) == 0 {
+						port = echoTCP(b)
+					} else {
+						port = serveTCP(b, func(conn net.Conn) { _, _ = application[0](conn) })
+					}
+					b.Run("mtu_9000", func(b *testing.B) {
+						for _, mode := range kernelBenchmarkProfileModes(transport) {
+							b.Run(mode, func(b *testing.B) {
+								benchmarkKernelEchoMode(b, mode, workload, 9000, proto.Clone(config).(*core.Config), port, applicationTLS)
+							})
+						}
+					})
+				})
+			}
+		})
+	}
+}
+
+// Keep experimental path additions in this list until they merit baseline CI.
+func kernelBenchmarkProfileModes(transport string) []string {
+	modes := []string{"hev_android_defaults", "socks_full_splice", "native_read_write", "native_download_splice"}
+	if transport == "freedom" {
+		modes = append(modes, "sing_direct_engine")
+	}
+	return modes
+}
+
+func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, config *core.Config, port int, applicationTLS *tls.Config) {
 	b.Helper()
 	b.StopTimer()
 	// Xray's log handler is shared by cores in this process. The client logger
@@ -122,6 +178,12 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, mtu int, config *core.Co
 		benchmarkKernelStack(b, name, ip4, ip6, mtu, handler.ctx, ordinaryForwarder, ordinaryForwarder.flowHandler)
 	case "native_download_splice":
 		instance = kernelCoreMTU(b, config, name, ip4, ip6, mtu)
+	case "sing_direct_engine":
+		socksForwarder = &kernelBenchmarkSOCKS{
+			flowHandler: &flowHandler{},
+			client:      &kernelBenchmarkDirectDialer{kernelBenchmarkLoopbackDialer{dialer: net.Dialer{Timeout: 5 * time.Second}}},
+		}
+		benchmarkKernelStack(b, name, ip4, ip6, mtu, context.Background(), socksForwarder, socksForwarder.flowHandler)
 	default:
 		b.Fatalf("unknown benchmark mode %q", mode)
 	}
@@ -173,12 +235,139 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, mtu int, config *core.Co
 		conn = secure
 		benchmarkVisionSmallRecords(b, conn, probe)
 		clog.RegisterHandler(quiet)
+	} else if workload != "duplex" {
+		benchmarkSmallRecords(b, conn)
 	}
-	payload := make([]byte, 4<<20)
+	transfer, verify, bytesPerOp := benchmarkKernelTraffic(b, raw, conn, workload)
+	if err := transfer(); err != nil {
+		b.Fatalf("warmup transfer failed: %v", err)
+	}
+	if err := verify(); err != nil {
+		b.Fatalf("warmup validation failed: %v", err)
+	}
+	switch mode {
+	case "socks_full_splice", "sing_direct_engine":
+		if socksForwarder.spliced.Load() != 1 {
+			b.Fatalf("%s did not use NewGo full Splice: %v", mode, socksForwarder.failure())
+		}
+	case "native_read_write":
+		if ordinaryForwarder.connections.Load() != 1 {
+			b.Fatal("ordinary native Read/Write adapter was not used")
+		}
+	case "native_download_splice":
+		assertNativeHandoff(b)
+	}
+	var before, after unix.Rusage
+	var childUserBefore, childSystemBefore float64
+	if hev != nil {
+		childUserBefore, childSystemBefore = hev.cpuTime(b)
+	}
+	b.ReportAllocs()
+	b.SetBytes(bytesPerOp)
+	b.ResetTimer()
+	b.ReportMetric(float64(pathMTU), "path-MTU")
+	b.ReportMetric(float64(mss), "local-MSS")
+	stopProfile := benchmarkKernelProfileStart(b)
+	if err := unix.Getrusage(unix.RUSAGE_SELF, &before); err != nil {
+		b.Fatal(err)
+	}
+	b.StartTimer()
+	for range b.N {
+		if err := transfer(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	if err := unix.Getrusage(unix.RUSAGE_SELF, &after); err != nil {
+		b.Fatal(err)
+	}
+	user := benchmarkTimevalSeconds(after.Utime) - benchmarkTimevalSeconds(before.Utime)
+	system := benchmarkTimevalSeconds(after.Stime) - benchmarkTimevalSeconds(before.Stime)
+	if hev != nil {
+		childUser, childSystem := hev.cpuTime(b)
+		user += childUser - childUserBefore
+		system += childSystem - childSystemBefore
+		b.ReportMetric((childUser-childUserBefore+childSystem-childSystemBefore)*1000/float64(b.N), "hev-cpu-ms/op")
+	}
+	stopProfile()
+	if err := verify(); err != nil {
+		b.Fatal("measured payload validation: ", err)
+	}
+	b.ReportMetric(user*1000/float64(b.N), "user-ms/op")
+	b.ReportMetric(system*1000/float64(b.N), "sys-ms/op")
+	b.ReportMetric((user+system)*1000/float64(b.N), "cpu-ms/op")
+	if user+system > 0 {
+		b.ReportMetric(float64(bytesPerOp)*float64(b.N)/1e6/(user+system), "MB/cpu-s")
+	}
+}
+
+func benchmarkKernelPayload() []byte {
+	payload := make([]byte, kernelBenchmarkPayloadSize)
 	for index := range payload {
 		payload[index] = byte(index*31 + index>>11)
 	}
+	return payload
+}
+
+func benchmarkKernelTraffic(b testing.TB, raw, conn net.Conn, workload string) (transfer, verify func() error, bytesPerOp int64) {
+	b.Helper()
+	payload := benchmarkKernelPayload()
+	deadline := func() error { return raw.SetDeadline(time.Now().Add(30 * time.Second)) }
+	if workload == "upload" {
+		var ack [1]byte
+		transfer = func() error {
+			if err := deadline(); err != nil {
+				return err
+			}
+			if err := benchmarkWriteAll(conn, []byte{'u'}); err != nil {
+				return err
+			}
+			if err := benchmarkWriteAll(conn, payload); err != nil {
+				return err
+			}
+			_, err := io.ReadFull(conn, ack[:])
+			return err
+		}
+		verify = func() error {
+			if err := deadline(); err != nil {
+				return err
+			}
+			if err := benchmarkWriteAll(conn, []byte{'v'}); err != nil {
+				return err
+			}
+			if _, err := io.ReadFull(conn, ack[:]); err != nil {
+				return err
+			}
+			if ack[0] != 1 {
+				return errors.New("server received different upload payload")
+			}
+			return nil
+		}
+		return transfer, verify, int64(len(payload))
+	}
 	received := make([]byte, len(payload))
+	verify = func() error {
+		if !bytes.Equal(received, payload) {
+			return errors.New("received different download payload")
+		}
+		return nil
+	}
+	if workload == "download" {
+		transfer = func() error {
+			if err := deadline(); err != nil {
+				return err
+			}
+			if err := benchmarkWriteAll(conn, []byte{'d'}); err != nil {
+				return err
+			}
+			_, err := io.ReadFull(conn, received)
+			return err
+		}
+		return transfer, verify, int64(len(payload))
+	}
+	if workload != "duplex" {
+		b.Fatalf("unknown benchmark workload %q", workload)
+	}
 	commands, results := make(chan struct{}), make(chan error, 1)
 	stop := make(chan struct{})
 	var writer sync.WaitGroup
@@ -205,8 +394,8 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, mtu int, config *core.Co
 		_ = raw.Close()
 		writer.Wait()
 	})
-	transfer := func() error {
-		if err := raw.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	transfer = func() error {
+		if err := deadline(); err != nil {
 			return err
 		}
 		commands <- struct{}{}
@@ -215,67 +404,199 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, mtu int, config *core.Co
 		}
 		return <-results
 	}
-	if err := transfer(); err != nil || !bytes.Equal(received, payload) {
-		b.Fatalf("warmup echo failed: %v", err)
-	}
-	switch mode {
-	case "socks_full_splice":
-		if socksForwarder.spliced.Load() != 1 {
-			b.Fatalf("SOCKS baseline did not use NewGo full Splice: %v", socksForwarder.failure())
+	return transfer, verify, int64(2 * len(payload))
+}
+
+// The application echoes the same readiness records as the duplex Vision
+// fixture, then transfers bulk data in one direction. Completion ACKs make
+// uploads wait for the actual receiver instead of measuring socket buffering.
+func benchmarkKernelOneWayServer(conn net.Conn, workload string) (int64, error) {
+	payload := benchmarkKernelPayload()
+	received := make([]byte, len(payload))
+	for _, size := range []int{1, 37, 1, 37} {
+		if _, err := io.ReadFull(conn, received[:size]); err != nil {
+			return 0, err
 		}
-	case "native_read_write":
-		if ordinaryForwarder.connections.Load() != 1 {
-			b.Fatal("ordinary native Read/Write adapter was not used")
+		if err := benchmarkWriteAll(conn, received[:size]); err != nil {
+			return 0, err
 		}
-	case "native_download_splice":
-		assertNativeHandoff(b)
 	}
-	var before, after unix.Rusage
-	var childUserBefore, childSystemBefore float64
-	if hev != nil {
-		childUserBefore, childSystemBefore = hev.cpuTime(b)
+	var total int64
+	var command [1]byte
+	for {
+		if _, err := io.ReadFull(conn, command[:]); err != nil {
+			return total, err
+		}
+		switch {
+		case command[0] == 'u' && workload == "upload":
+			if _, err := io.ReadFull(conn, received); err != nil {
+				return total, err
+			}
+			total += int64(len(received))
+			if err := benchmarkWriteAll(conn, []byte{1}); err != nil {
+				return total, err
+			}
+		case command[0] == 'v' && workload == "upload":
+			var valid byte
+			if bytes.Equal(received, payload) {
+				valid = 1
+			}
+			if err := benchmarkWriteAll(conn, []byte{valid}); err != nil {
+				return total, err
+			}
+		case command[0] == 'd' && workload == "download":
+			if err := benchmarkWriteAll(conn, payload); err != nil {
+				return total, err
+			}
+			total += int64(len(payload))
+		default:
+			return total, fmt.Errorf("unexpected %q command for %s workload", command[0], workload)
+		}
 	}
-	b.ReportAllocs()
-	b.SetBytes(int64(2 * len(payload)))
-	b.ResetTimer()
-	b.ReportMetric(float64(pathMTU), "path-MTU")
-	b.ReportMetric(float64(mss), "local-MSS")
-	if err := unix.Getrusage(unix.RUSAGE_SELF, &before); err != nil {
+}
+
+func TestKernelBenchmarkOneWayProtocol(t *testing.T) {
+	for _, workload := range []string{"upload", "download"} {
+		t.Run(workload, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			type result struct {
+				bytes int64
+				err   error
+			}
+			done := make(chan result, 1)
+			go func() {
+				defer server.Close()
+				bytes, err := benchmarkKernelOneWayServer(server, workload)
+				done <- result{bytes, err}
+			}()
+			benchmarkSmallRecords(t, client)
+			transfer, verify, bytesPerOp := benchmarkKernelTraffic(t, client, client, workload)
+			if bytesPerOp != kernelBenchmarkPayloadSize {
+				t.Fatalf("one-way SetBytes=%d", bytesPerOp)
+			}
+			for range 2 {
+				if err := transfer(); err != nil {
+					t.Fatal(err)
+				}
+				if err := verify(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_ = client.Close()
+			got := <-done
+			if got.bytes != 2*kernelBenchmarkPayloadSize || !errors.Is(got.err, io.EOF) {
+				t.Fatalf("server result=%+v", got)
+			}
+		})
+	}
+	t.Run("corrupt_upload", func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer server.Close()
+			_, _ = benchmarkKernelOneWayServer(server, "upload")
+		}()
+		benchmarkSmallRecords(t, client)
+		_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+		payload := benchmarkKernelPayload()
+		payload[len(payload)-1] ^= 1
+		if err := benchmarkWriteAll(client, append([]byte{'u'}, payload...)); err != nil {
+			t.Fatal(err)
+		}
+		var ack [1]byte
+		if _, err := io.ReadFull(client, ack[:]); err != nil {
+			t.Fatal(err)
+		}
+		if err := benchmarkWriteAll(client, []byte{'v'}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(client, ack[:]); err != nil || ack[0] != 0 {
+			t.Fatalf("corrupted payload accepted: ack=%d, err=%v", ack[0], err)
+		}
+		_ = client.Close()
+		<-done
+	})
+}
+
+// Each diagnostic process selects one case and one profiler. Calibration runs
+// overwrite the same CPU/trace file; the final run is retained. Block records
+// accumulate the measured calibration intervals for that same case. Go profiles
+// exclude the HEV child, whose CPU remains included in the reported totals.
+func benchmarkKernelProfileStart(b *testing.B) func() {
+	b.Helper()
+	kind := os.Getenv("XRAY_NATIVE_PROFILE")
+	if kind == "" {
+		return func() {}
+	}
+	directory := os.Getenv("XRAY_NATIVE_PROFILE_DIR")
+	if directory == "" {
+		b.Fatal("XRAY_NATIVE_PROFILE_DIR is required for profiling")
+	}
+	if err := os.MkdirAll(directory, 0o755); err != nil {
 		b.Fatal(err)
 	}
-	b.StartTimer()
-	for range b.N {
-		if err := transfer(); err != nil {
-			b.Fatal(err)
-		}
+	extension := ".pprof"
+	if kind == "trace" {
+		extension = ".trace"
 	}
-	b.StopTimer()
-	if err := unix.Getrusage(unix.RUSAGE_SELF, &after); err != nil {
+	file, err := os.Create(filepath.Join(directory, kind+extension))
+	if err != nil {
 		b.Fatal(err)
 	}
-	if !bytes.Equal(received, payload) {
-		b.Fatal("measured echo payload differs")
+	var finish func()
+	switch kind {
+	case "cpu":
+		err = pprof.StartCPUProfile(file)
+		finish = pprof.StopCPUProfile
+	case "block":
+		runtime.SetBlockProfileRate(1)
+		finish = func() {
+			runtime.SetBlockProfileRate(0)
+			if err := pprof.Lookup("block").WriteTo(file, 0); err != nil {
+				b.Error(err)
+			}
+		}
+	case "trace":
+		err = trace.Start(file)
+		finish = trace.Stop
+	default:
+		err = fmt.Errorf("unknown XRAY_NATIVE_PROFILE %q", kind)
 	}
-	user := benchmarkTimevalSeconds(after.Utime) - benchmarkTimevalSeconds(before.Utime)
-	system := benchmarkTimevalSeconds(after.Stime) - benchmarkTimevalSeconds(before.Stime)
-	if hev != nil {
-		childUser, childSystem := hev.cpuTime(b)
-		user += childUser - childUserBefore
-		system += childSystem - childSystemBefore
-		b.ReportMetric((childUser-childUserBefore+childSystem-childSystemBefore)*1000/float64(b.N), "hev-cpu-ms/op")
+	if err != nil {
+		_ = file.Close()
+		b.Fatal(err)
 	}
-	b.ReportMetric(user*1000/float64(b.N), "user-ms/op")
-	b.ReportMetric(system*1000/float64(b.N), "sys-ms/op")
-	b.ReportMetric((user+system)*1000/float64(b.N), "cpu-ms/op")
-	if user+system > 0 {
-		b.ReportMetric(float64(2*len(payload))*float64(b.N)/1e6/(user+system), "MB/cpu-s")
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			finish()
+			if err := file.Close(); err != nil {
+				b.Error(err)
+			}
+		})
 	}
+	b.Cleanup(stop)
+	return stop
 }
 
 // A large first application write can keep Vision padding active because its
 // records span many source buffers. Small complete TLS application records let
 // the genuine state machine negotiate its direct phase before the bulk workload.
 func benchmarkVisionSmallRecords(t testing.TB, conn net.Conn, probe *kernelBenchmarkVisionProbe) {
+	t.Helper()
+	benchmarkSmallRecords(t, conn)
+	if probe.tls13.Load() < 2 || probe.direct.Load() < 2 {
+		t.Fatalf("Vision did not complete its genuine bidirectional direct transition: TLS1.3 observations=%d, command-2 receipts=%d",
+			probe.tls13.Load(), probe.direct.Load())
+	}
+}
+
+func benchmarkSmallRecords(t testing.TB, conn net.Conn) {
 	t.Helper()
 	for index, size := range []int{1, 37, 1, 37} {
 		payload := bytes.Repeat([]byte{byte(index + 31)}, size)
@@ -286,10 +607,6 @@ func benchmarkVisionSmallRecords(t testing.TB, conn net.Conn, probe *kernelBench
 		if _, err := io.ReadFull(conn, actual); err != nil || !bytes.Equal(actual, payload) {
 			t.Fatalf("Vision small-record warmup %d: payload=%x, err=%v", size, actual, err)
 		}
-	}
-	if probe.tls13.Load() < 2 || probe.direct.Load() < 2 {
-		t.Fatalf("Vision did not complete its genuine bidirectional direct transition: TLS1.3 observations=%d, command-2 receipts=%d",
-			probe.tls13.Load(), probe.direct.Load())
 	}
 }
 
@@ -491,6 +808,15 @@ func (d *kernelBenchmarkLoopbackDialer) DialContext(ctx context.Context, network
 
 func (*kernelBenchmarkLoopbackDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
 	return nil, errors.New("benchmark is TCP-only")
+}
+
+// The standalone control uses the same full-Splice owner, with a real direct
+// socket to the local application instead of a SOCKS socket or an Xray core.
+type kernelBenchmarkDirectDialer struct{ kernelBenchmarkLoopbackDialer }
+
+func (d *kernelBenchmarkDirectDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	destination.Addr = netip.MustParseAddr("127.0.0.1")
+	return d.kernelBenchmarkLoopbackDialer.DialContext(ctx, network, destination)
 }
 
 type kernelBenchmarkSpliceSocket struct {

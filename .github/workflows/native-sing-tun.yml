@@ -4,12 +4,39 @@ on:
   push:
     branches: [feature/native-sing-tun]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Verification or focused Linux profiling
+        type: choice
+        options: [verify, profile]
+        default: verify
+      profile_transport:
+        description: Profile transport
+        type: choice
+        options: [all, freedom, vision_tls13]
+        default: all
+      profile_workload:
+        description: Bulk direction (duplex is aggregate echo)
+        type: choice
+        options: [all, duplex, upload, download]
+        default: all
+      profile_path:
+        description: Path (direct engine control supports freedom only)
+        type: choice
+        options: [all, hev_android_defaults, socks_full_splice, native_read_write, native_download_splice, sing_direct_engine]
+        default: all
+      profiler:
+        description: Diagnostic instrumentation, separate from timing baseline
+        type: choice
+        options: [cpu, block, trace, all]
+        default: cpu
 
 permissions:
   contents: read
 
 jobs:
   contracts:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'profile'
     strategy:
       fail-fast: false
       matrix:
@@ -66,7 +93,7 @@ jobs:
         run: |
           go test -tags with_sing_tun -c ./proxy/singtun -o native-tun-bench
           sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 XRAY_HEV_BENCHMARK_BINARY="$RUNNER_TEMP/hev-bench" XRAY_HEV_CLOCK_TICKS="$(getconf CLK_TCK)" \
-            ./native-tun-bench -test.run '^$' -test.bench '^BenchmarkKernel' -test.benchmem -test.benchtime=2s -test.count=3 -test.timeout=10m | tee native-benchmark.txt
+            ./native-tun-bench -test.run '^$' -test.bench '^BenchmarkKernelNativeEchoDuplex$' -test.benchmem -test.benchtime=2s -test.count=3 -test.timeout=10m | tee native-benchmark.txt
           test "${PIPESTATUS[0]}" = 0
           python3 - <<'PY'
           from pathlib import Path
@@ -92,6 +119,7 @@ jobs:
           path: native-benchmark.txt
           if-no-files-found: ignore
   format:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'profile'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -100,3 +128,142 @@ jobs:
           go-version-file: go.mod
       - run: go run ./infra/vformat/main.go -mode check -pwd ./
       - run: go run ./infra/vprotogen/main.go -mode check -pwd ./
+  profile:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'profile'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROFILE_TRANSPORT: ${{ inputs.profile_transport }}
+      PROFILE_WORKLOAD: ${{ inputs.profile_workload }}
+      PROFILE_PATH: ${{ inputs.profile_path }}
+      PROFILER: ${{ inputs.profiler }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/checkout@v7
+        with:
+          repository: heiher/hev-socks5-tunnel
+          ref: c5584feca8f6df70ee53eb2879e034b849a3d15a
+          submodules: recursive
+          path: benchmark-deps/hev
+          persist-credentials: false
+      - name: Build focused benchmark and pinned HEV runner
+        run: |
+          mkdir -p profile-evidence
+          go test -tags with_sing_tun ./proxy/singtun -run '^TestKernelBenchmarkOneWayProtocol$' -count=1
+          go test -tags with_sing_tun -c ./proxy/singtun -o profile-evidence/native-tun-bench
+          make -C benchmark-deps/hev -j2 static
+          cc -O3 -Ibenchmark-deps/hev/include proxy/singtun/testdata/hev_runner.c \
+            benchmark-deps/hev/bin/libhev-socks5-tunnel.a \
+            benchmark-deps/hev/third-part/yaml/bin/libyaml.a \
+            benchmark-deps/hev/third-part/lwip/bin/liblwip.a \
+            benchmark-deps/hev/third-part/hev-task-system/bin/libhev-task-system.a \
+            -pthread -o "$RUNNER_TEMP/hev-bench"
+      - name: Record measurement scope and machine
+        run: |
+          {
+            echo 'Baseline: uninstrumented, 3 x 2s per selected case, actual TUN MTU9000.'
+            echo 'Duplex counts 8MiB/op; upload/download count 4MiB/op plus uncounted one-byte controls.'
+            echo 'CPU totals include this Go process (application/Xray/local Vision node) and the HEV child.'
+            echo 'Go CPU/block/trace profiles exclude HEV child execution and C allocations.'
+            echo 'Diagnostics start after warmup; instrumented results must not be ranked with the baseline.'
+            echo 'CPU/trace retain final calibration run; block accumulates measured intervals of one case.'
+            echo 'This is a local Linux control, not Android or external-network throughput/energy.'
+            echo "Core: $GITHUB_SHA"
+            git -C benchmark-deps/hev rev-parse HEAD
+            git -C benchmark-deps/hev submodule status
+            go version
+            go version -m profile-evidence/native-tun-bench
+            uname -a
+            lscpu
+            getconf CLK_TCK
+          } > profile-evidence/environment.txt
+      - name: Measure baseline then profile each selected path
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$PROFILE_TRANSPORT" in all|freedom|vision_tls13) ;; *) exit 2 ;; esac
+          case "$PROFILE_WORKLOAD" in all|duplex|upload|download) ;; *) exit 2 ;; esac
+          case "$PROFILE_PATH" in all|hev_android_defaults|socks_full_splice|native_read_write|native_download_splice|sing_direct_engine) ;; *) exit 2 ;; esac
+          case "$PROFILER" in cpu|block|trace) profilers=("$PROFILER") ;; all) profilers=(cpu block trace) ;; *) exit 2 ;; esac
+          if [[ "$PROFILE_TRANSPORT" == vision_tls13 && "$PROFILE_PATH" == sing_direct_engine ]]; then
+            echo 'The direct engine control bypasses Xray and supports freedom only.'
+            exit 2
+          fi
+          ticks=$(getconf CLK_TCK)
+          # Complete every uninstrumented run before enabling any profiler.
+          for phase in baseline diagnostic; do
+          for transport in freedom vision_tls13; do
+            [[ "$PROFILE_TRANSPORT" == all || "$PROFILE_TRANSPORT" == "$transport" ]] || continue
+            modes=(hev_android_defaults socks_full_splice native_read_write native_download_splice)
+            [[ "$transport" != freedom ]] || modes+=(sing_direct_engine)
+            for workload in duplex upload download; do
+              [[ "$PROFILE_WORKLOAD" == all || "$PROFILE_WORKLOAD" == "$workload" ]] || continue
+              for mode in "${modes[@]}"; do
+                [[ "$PROFILE_PATH" == all || "$PROFILE_PATH" == "$mode" ]] || continue
+                name="$transport/$workload/mtu_9000/$mode"
+                directory="$PWD/profile-evidence/$name"
+                mkdir -p "$directory"
+                pattern="^BenchmarkKernelNativeProfile$/$transport/$workload/mtu_9000/$mode\$"
+                if [[ "$phase" == baseline ]]; then
+                  sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 XRAY_HEV_BENCHMARK_BINARY="$RUNNER_TEMP/hev-bench" XRAY_HEV_CLOCK_TICKS="$ticks" \
+                    profile-evidence/native-tun-bench -test.run '^$' -test.bench "$pattern" -test.benchmem -test.benchtime=2s -test.count=3 -test.timeout=2m \
+                    | tee "$directory/baseline.txt"
+                  continue
+                fi
+                for profiler in "${profilers[@]}"; do
+                  case "$profiler" in cpu) duration=5s ;; block) duration=2s ;; trace) duration=1s ;; esac
+                  output="$directory/$profiler"
+                  mkdir -p "$output"
+                  sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 XRAY_HEV_BENCHMARK_BINARY="$RUNNER_TEMP/hev-bench" XRAY_HEV_CLOCK_TICKS="$ticks" \
+                    XRAY_NATIVE_PROFILE="$profiler" XRAY_NATIVE_PROFILE_DIR="$output" \
+                    profile-evidence/native-tun-bench -test.run '^$' -test.bench "$pattern" -test.benchmem -test.benchtime="$duration" -test.count=1 -test.timeout=2m \
+                    | tee "$output/diagnostic.txt"
+                  if [[ "$profiler" == trace ]]; then
+                    for kind in sched sync syscall net; do
+                      go tool trace -pprof="$kind" "$output/trace.trace" > "$output/$kind.pprof"
+                      go tool pprof -top -nodecount=60 profile-evidence/native-tun-bench "$output/$kind.pprof" > "$output/$kind.txt"
+                    done
+                  else
+                    go tool pprof -top -nodecount=80 profile-evidence/native-tun-bench "$output/$profiler.pprof" > "$output/top.txt"
+                    go tool pprof -top -cum -nodecount=80 profile-evidence/native-tun-bench "$output/$profiler.pprof" > "$output/cumulative.txt"
+                  fi
+                done
+              done
+            done
+          done
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('profile-evidence')
+          baselines = list(root.glob('*/*/mtu_9000/*/baseline.txt'))
+          if not baselines:
+              raise SystemExit('No selected baseline cases ran')
+          for path in baselines:
+              result = path.read_text()
+              rows = [line for line in result.splitlines() if ' ns/op' in line and ' allocs/op' in line]
+              if len(rows) != 3 or '--- FAIL:' in result or 'SKIP' in result:
+                  raise SystemExit(f'Incomplete baseline: {path}')
+              for row in rows:
+                  fields = row.split()
+                  if int(fields[fields.index('path-MTU') - 1]) != 9000:
+                      raise SystemExit(f'Incorrect actual MTU: {row}')
+                  if float(fields[fields.index('cpu-ms/op') - 1]) <= 0:
+                      raise SystemExit(f'Missing CPU accounting: {row}')
+          for path in root.glob('*/*/mtu_9000/*/*/diagnostic.txt'):
+              result = path.read_text()
+              if ' ns/op' not in result or '--- FAIL:' in result or 'SKIP' in result:
+                  raise SystemExit(f'Incomplete diagnostic: {path}')
+          print(f'Validated {len(baselines)} paths, {3 * len(baselines)} uninstrumented rows')
+          PY
+      - name: Preserve raw profiles and uninstrumented reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-profile-${{ github.sha }}
+          path: profile-evidence
+          if-no-files-found: ignore
+          retention-days: 14
