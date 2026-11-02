@@ -110,6 +110,56 @@ conclusions: some Vision connections remained framed and two handoff assertions
 failed. It is excluded. The final workflow rejects failed subcases and requires
 all 18 measured rows, in addition to checking the process exit status.
 
+### HEV comparison and path names
+
+The three original rows combine two separate dimensions: how the stack enters
+Xray and how TCP bytes are moved. They are not three APK selector entries.
+
+| Benchmark path | Packet/stream path | APK VPN choice |
+| --- | --- | --- |
+| SOCKS + full engine Splice | TUN → sing-tun NewGo → loopback SOCKS → Xray dispatcher/outbound | Sing TUN |
+| Native Read/Write | TUN → NewGo inside Xray → dispatcher/outbound, ordinary pooled-buffer reads/writes | Sing native TUN, ordinary phase; benchmark disables optional handoff |
+| Native download handoff | Same direct dispatcher path; eligible raw download socket is read by the native engine | Sing native TUN, conditional TCP optimization |
+| HEV | TUN → HEV/lwIP → loopback SOCKS → Xray dispatcher/outbound | HEV TUN |
+
+The native APK option starts with normal I/O and uses download handoff only
+after Xray permits it. Upload retains Xray processing. Unsupported conditions
+keep normal I/O. UDP uses its own adapter and is not a SpliceDownload path.
+The APK preserves the previously saved backend; installing it does not select
+Sing native automatically.
+
+[HEV comparison run 41424113515](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41424113515)
+adds the APK-pinned HEV `c5584feca8f6df70ee53eb2879e034b849a3d15a` (2.19.3).
+It uses a small library runner borrowing the same no-virtio-header TUN fd, not
+the stock executable, which would create/configure a different TUN. Total CPU
+includes both the Go process and HEV child process. Go B/op does not include HEV
+C allocations and must not be used as a total-memory comparison.
+
+This run uses Linux amd64 AMD EPYC 9V45, GOMAXPROCS=4, configured MTU1500 and
+the same verified Vision fixture/workload as above. Its CPU model differs from
+the earlier run; compare rows within this run, not absolute values across runs.
+Each value is the median of three two-second samples, 4MiB upload + 4MiB echo.
+
+| Path | freedom MB/s | freedom CPU ms/op | Vision MB/s | Vision CPU ms/op |
+| --- | ---: | ---: | ---: | ---: |
+| HEV, Android defaults | 688.54 | 20.64 | 657.58 | 33.92 |
+| HEV, jumbo disabled | 225.37 | 38.84 | 207.08 | 50.59 |
+| Sing via SOCKS/full engine Splice | 483.35 | 35.24 | 449.39 | 46.24 |
+| Sing direct/ordinary I/O | 533.82 | 41.72 | 496.90 | 47.07 |
+| Sing direct/eligible download handoff | 411.80 | 36.92 | 416.74 | 43.27 |
+
+HEV's actual Android config omits offload options. At this pin, a supplied TUN
+without IFF_VNET_HDR still retains its default local jumbo support, so configured
+MTU1500 does not mean every injected TCP packet is <=1500 bytes. The separate
+jumbo-disabled row sets tso/uso/jumbo=false; it must not replace the app-default
+row or be presented as actual APK defaults. This implementation detail has a
+large impact here. Default HEV wins both throughput and CPU in this workload;
+the new native implementation is not established as an HEV performance upgrade.
+Android/ARM energy, UDP, idle wakeups, WAN latency and many-flow behavior remain
+unmeasured. This update changes benchmarks/documentation only; the delivered APK
+and its runtime core remain unchanged. The extended workflow requires all 30
+measurements and rejects failed subcases.
+
 ## Configuration and host responsibilities
 
 This is a portless inbound; omit `listen` and `port`. A minimal example is:
