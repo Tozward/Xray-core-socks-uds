@@ -13,9 +13,10 @@ import subprocess
 ROOT = Path("batch-evidence").resolve()
 ROOT.mkdir(exist_ok=True)
 env = dict(os.environ, GOMAXPROCS="4")
+subprocess.run(["go", "mod", "download", "github.com/sagernet/sing-tun"], env=env, check=True)
 module = json.loads(subprocess.check_output(
     ["go", "list", "-m", "-json", "github.com/sagernet/sing-tun"], env=env))
-source = Path(module["Dir"]) / "stack_go_splice.go"
+source = Path(module["Replace"]["Dir"]) / "stack_go_splice.go"
 original = source.read_text()
 needle = "goSpliceReadChunk  = 2 * goSlabSize"
 if original.count(needle) != 1:
@@ -68,6 +69,9 @@ def measure(variant, name, repetition, fairness=False):
             minimum = 4 * 1024 * 1024 if workload == "duplex" or workload == {"up": "upload", "down": "download"}[direction] else 1
             if metrics.get(f"native-{direction}-B/op", 0) < minimum:
                 raise SystemExit(f"Incomplete native {direction} handoff: {path}")
+    elif not (metrics.get("min-completed", 0) > 0 and 0 < metrics.get("Jain-index", 0) <= 1
+              and metrics.get("probe-count", 0) > 0 and metrics.get("probe-p99-us", 0) > 0):
+        raise SystemExit(f"Incomplete mixed-flow evidence: {path}")
     print(f"{variant}KiB {name} repeat={repetition} {metrics}", flush=True)
     return {"variant_KiB": int(variant), "name": name, "repetition": repetition, "metrics": metrics}
 
@@ -77,18 +81,20 @@ rng = random.Random(20261103)
 bulk = [f"BenchmarkKernelNativeProfile/{transport}/{workload}/mtu_9000/native_bidirectional_jumbo"
         for transport in ("freedom", "freedom_tls13", "vision_tls13")
         for workload in ("upload", "download", "duplex")]
+fairness = [f"BenchmarkKernelNativeBatchFairness/{transport}/flows_{flows}"
+            for transport in ("freedom_tls13", "vision_tls13") for flows in (1, 4)]
 for repetition in range(5):
-    cases = bulk.copy()
+    cases = bulk + fairness
     rng.shuffle(cases)
     for name in cases:
         order = variants.copy()
         rng.shuffle(order)
         for variant in order:
-            results.append(measure(variant, name, repetition))
+            results.append(measure(variant, name, repetition, fairness=name in fairness))
             (ROOT / "results.json").write_text(json.dumps(results, indent=2))
 
 summary = []
-for name in bulk:
+for name in bulk + fairness:
     for variant in variants:
         samples = [row["metrics"] for row in results if row["name"] == name and row["variant_KiB"] == int(variant)]
         summary.append({"name": name, "variant_KiB": int(variant), "samples": len(samples),
