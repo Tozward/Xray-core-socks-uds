@@ -544,3 +544,28 @@ handoff boundary. Their absent remote address now declines before touching the
 native stream. Both directions reproduce the former panic and now preserve the
 original descriptor and queued datagram. Connected datagrams still decline;
 TCP/Unix streams and protocol readiness retain their preceding behavior.
+
+### Candidate .4 validation
+
+[Core run 41502724582](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41502724582)
+at `d276f910aabb31c1303e56293ca108c17d9b9aa7` passes Linux and Windows default/
+tagged checks, Linux real-TUN/Vision repeats and the complete 60-row baseline,
+plus formatting/protobuf checks. Local macOS arm64 focused tagged race checks
+pass using the final published dependency pin.
+
+[Dependency run 41502596650](https://github.com/Tozward/sing-tun/actions/runs/41502596650)
+at `9af120bbf52457f6c946e4d63587c2bfed57e07e` passes Linux focused races and
+privileged descriptor/socket/kernel-memory-link checks, plus Windows compilation.
+**Not run:** hosted macOS jobs in these workflows did not acquire runners and
+were cancelled; GitHub reports arm64 capacity constraints. Local macOS memory-link
+kernel cases require utun permission and were not run there; the corresponding
+Linux privileged cases pass. The workflow totals must not be described as green.
+
+[Android candidate run 41502856334](https://github.com/Tozward/v2rayNG-n/actions/runs/41502856334)
+passes at app source `7f5ea105a4cadb51ff56871bcf27ed052c8a7b18`, version
+`2.3.15.3-native-sing-tun.4` / code768: native adapter races/vet and FD repeats,
+four-ABI combined AAR and signed release packages, both distributions' unit/
+Kotlin/assembly/lint checks, and Android API24/API35 VPN backend TCP/UDP checks
+at MTU1280/1500/9000. The arm64 Playstore APK is 32934142 bytes (612 bytes larger
+than .3), SHA256 `029fc296c05ed591e0e84ac3b7edfc5ba4b8c205d88cd18d55ac4d1864afd5c8`.
+No physical phone was operated, and no phone energy measurement was performed.
