@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,8 +23,10 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	singsocks "github.com/sagernet/sing/protocol/socks"
+	applog "github.com/xtls/xray-core/app/log"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common/buf"
+	clog "github.com/xtls/xray-core/common/log"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/session"
@@ -65,9 +68,16 @@ func BenchmarkKernelNativeEchoDuplex(b *testing.B) {
 func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, port int, applicationTLS *tls.Config) {
 	b.Helper()
 	b.StopTimer()
+	// Xray's log handler is shared by cores in this process. The client logger
+	// therefore also suppresses the fixture node's logs during bulk transfer.
+	// Put it first so core initialization cannot leave the default debug logger.
+	config.App = append([]*serial.TypedMessage{serial.ToTypedMessage(&applog.Config{
+		ErrorLogType: applog.LogType_None, AccessLogType: applog.LogType_None, ErrorLogLevel: clog.Severity_Error,
+	})}, config.App...)
 	_, name, ip4, ip6 := kernelDevice(b)
 	var socksForwarder *kernelBenchmarkSOCKS
 	var ordinaryForwarder *kernelBenchmarkOrdinary
+	var instance *core.Instance
 	switch mode {
 	case "socks_full_splice":
 		socksPort := visionLoopbackPort(b)
@@ -79,10 +89,11 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 			}),
 			ProxySettings: serial.ToTypedMessage(&xsocks.ServerConfig{AuthType: xsocks.AuthType_NO_AUTH, UserLevel: 7}),
 		}}
-		instance, err := core.New(config)
+		created, err := core.New(config)
 		if err != nil {
 			b.Fatal(err)
 		}
+		instance = created
 		b.Cleanup(func() { _ = instance.Close() })
 		if err = instance.Start(); err != nil {
 			b.Fatal(err)
@@ -94,17 +105,28 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 		}
 		benchmarkKernelStack(b, name, ip4, ip6, context.Background(), socksForwarder, socksForwarder.flowHandler)
 	case "native_read_write":
-		_, handler := memoryCore(b, config, session.SniffingRequest{})
+		created, handler := memoryCore(b, config, session.SniffingRequest{})
+		instance = created
 		ordinaryForwarder = &kernelBenchmarkOrdinary{flowHandler: &flowHandler{native: handler.native, mtu: 1500}}
 		benchmarkKernelStack(b, name, ip4, ip6, handler.ctx, ordinaryForwarder, ordinaryForwarder.flowHandler)
 	case "native_download_splice":
-		kernelCore(b, config, name, ip4, ip6)
+		instance = kernelCore(b, config, name, ip4, ip6)
 	default:
 		b.Fatalf("unknown benchmark mode %q", mode)
 	}
 	raw := kernelDial(b, ip4, port)
 	var conn net.Conn = raw
 	if applicationTLS != nil {
+		quiet, ok := instance.GetFeature((*applog.Instance)(nil)).(*applog.Instance)
+		if !ok {
+			b.Fatal("benchmark core has no quiet logger")
+		}
+		// Observe protocol output only while warming up. No readiness state is
+		// written or sampled across goroutines. Restore the known core-owned
+		// logger before any bulk transfer, including on an early benchmark failure.
+		probe := &kernelBenchmarkVisionProbe{}
+		clog.RegisterHandler(probe)
+		b.Cleanup(func() { clog.RegisterHandler(quiet) })
 		secure := tls.Client(raw, applicationTLS.Clone())
 		if err := secure.Handshake(); err != nil {
 			b.Fatal(err)
@@ -113,6 +135,8 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 			b.Fatal("benchmark application did not establish verified TLS1.3")
 		}
 		conn = secure
+		benchmarkVisionSmallRecords(b, conn, probe)
+		clog.RegisterHandler(quiet)
 	}
 	payload := make([]byte, 4<<20)
 	for index := range payload {
@@ -197,6 +221,51 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 	b.ReportMetric((user+system)*1000/float64(b.N), "cpu-ms/op")
 	if user+system > 0 {
 		b.ReportMetric(float64(2*len(payload))*float64(b.N)/1e6/(user+system), "MB/cpu-s")
+	}
+}
+
+// A large first application write can keep Vision padding active because its
+// records span many source buffers. Small complete TLS application records let
+// the genuine state machine negotiate its direct phase before the bulk workload.
+func benchmarkVisionSmallRecords(t testing.TB, conn net.Conn, probe *kernelBenchmarkVisionProbe) {
+	t.Helper()
+	for index, size := range []int{1, 37, 1, 37} {
+		payload := bytes.Repeat([]byte{byte(index + 31)}, size)
+		if err := benchmarkWriteAll(conn, payload); err != nil {
+			t.Fatal("Vision small-record warmup write: ", err)
+		}
+		actual := make([]byte, len(payload))
+		if _, err := io.ReadFull(conn, actual); err != nil || !bytes.Equal(actual, payload) {
+			t.Fatalf("Vision small-record warmup %d: payload=%x, err=%v", size, actual, err)
+		}
+	}
+	if probe.tls13.Load() < 2 || probe.direct.Load() < 2 {
+		t.Fatalf("Vision did not complete its genuine bidirectional direct transition: TLS1.3 observations=%d, command-2 receipts=%d",
+			probe.tls13.Load(), probe.direct.Load())
+	}
+}
+
+// This temporary, silent warmup observer records the two real Vision peers'
+// TLS detection and padding-direct receipts. It is removed before bulk warmup
+// and measurement, so debug message construction is also outside measured CPU.
+type kernelBenchmarkVisionProbe struct {
+	tls13  atomic.Uint32
+	direct atomic.Uint32
+}
+
+func (*kernelBenchmarkVisionProbe) Severity() clog.Severity { return clog.Severity_Debug }
+
+func (p *kernelBenchmarkVisionProbe) Handle(message clog.Message) {
+	general, ok := message.(*clog.GeneralMessage)
+	if !ok || general.Severity != clog.Severity_Debug {
+		return
+	}
+	text := general.String()
+	if strings.Contains(text, "XtlsFilterTls found tls 1.3!") {
+		p.tls13.Add(1)
+	}
+	if strings.Contains(text, "Xtls Unpadding new block,") && strings.HasSuffix(text, " command 2") {
+		p.direct.Add(1)
 	}
 }
 

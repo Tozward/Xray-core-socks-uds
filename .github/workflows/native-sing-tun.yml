@@ -48,6 +48,17 @@ jobs:
           go test -tags with_sing_tun -c ./proxy/singtun -o native-tun-bench
           sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 ./native-tun-bench -test.run '^$' -test.bench '^BenchmarkKernel' -test.benchmem -test.benchtime=2s -test.count=3 -test.timeout=10m | tee native-benchmark.txt
           test "${PIPESTATUS[0]}" = 0
+          python3 - <<'PY'
+          from pathlib import Path
+
+          result = Path('native-benchmark.txt').read_text()
+          # Validate every subcase as well as the process status.
+          if '--- FAIL:' in result or 'WARNING: DATA RACE' in result:
+              raise SystemExit('Benchmark includes a failed subcase')
+          rows = [line for line in result.splitlines() if ' ns/op' in line and ' allocs/op' in line]
+          if len(rows) != 18:
+              raise SystemExit(f'Expected 18 measured results, found {len(rows)}')
+          PY
       - name: Preserve benchmark evidence
         if: runner.os == 'Linux' && always()
         uses: actions/upload-artifact@v7
