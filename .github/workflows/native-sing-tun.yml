@@ -323,5 +323,6 @@ jobs:
           path: |
             batch-evidence
             !batch-evidence/**/native-tun-bench
+            !batch-evidence/dependency
           if-no-files-found: error
           retention-days: 14

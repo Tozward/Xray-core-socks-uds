@@ -6,17 +6,27 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
 import statistics
 import subprocess
 
 
-ROOT = Path("batch-evidence").resolve()
+ROOT = Path(os.environ.get("NATIVE_BATCH_ROOT", "batch-evidence")).resolve()
 ROOT.mkdir(exist_ok=True)
-env = dict(os.environ, GOMAXPROCS="4")
+env = dict(os.environ, GOMAXPROCS="4", GOWORK="off")
 subprocess.run(["go", "mod", "download", "github.com/sagernet/sing-tun"], env=env, check=True)
 module = json.loads(subprocess.check_output(
     ["go", "list", "-m", "-json", "github.com/sagernet/sing-tun"], env=env))
-source = Path(module["Replace"]["Dir"]) / "stack_go_splice.go"
+dependency = ROOT / "dependency"
+shutil.copytree(module["Replace"]["Dir"], dependency)
+# Go forbids overlays below its module cache. Keep the exact dependency in an
+# isolated directory and change only this experiment's alternate module file.
+modfile = ROOT / "batch.mod"
+shutil.copyfile("go.mod", modfile)
+shutil.copyfile("go.sum", modfile.with_suffix(".sum"))
+subprocess.run(["go", "mod", "edit", f"-modfile={modfile}",
+                f"-replace=github.com/sagernet/sing-tun={dependency}"], env=env, check=True)
+source = dependency / "stack_go_splice.go"
 original = source.read_text()
 needle = "goSpliceReadChunk  = 2 * goSlabSize"
 if original.count(needle) != 1:
@@ -32,7 +42,7 @@ for variant in variants:
     overlay = directory / "overlay.json"
     overlay.write_text(json.dumps({"Replace": {str(source): str(replacement)}}))
     binary = directory / "native-tun-bench"
-    subprocess.run(["go", "test", f"-overlay={overlay}", "-tags", "with_sing_tun", "-c",
+    subprocess.run(["go", "test", f"-modfile={modfile}", f"-overlay={overlay}", "-tags", "with_sing_tun", "-c",
                     "./proxy/singtun", "-o", str(binary)], env=env, check=True)
     manifest["variants"][variant] = {"splice_sha256": hashlib.sha256(replacement.read_bytes()).hexdigest(),
                                        "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
