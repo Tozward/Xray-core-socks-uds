@@ -28,7 +28,7 @@ subprocess.run(["go", "mod", "edit", f"-modfile={modfile}",
                 f"-replace=github.com/sagernet/sing-tun={dependency}"], env=env, check=True)
 source = dependency / "stack_go_splice.go"
 original = source.read_text()
-needle = "goSpliceReadChunk  = 2 * goSlabSize"
+needle = "goSpliceReadChunk = 4 * goSlabSize"
 if original.count(needle) != 1:
     raise SystemExit("Pinned splice batch declaration changed; review the experiment")
 variants = ["64", "128", "256"]
@@ -38,7 +38,7 @@ for variant in variants:
     directory = ROOT / variant
     directory.mkdir(exist_ok=True)
     replacement = directory / "stack_go_splice.go"
-    replacement.write_text(original.replace(needle, f"goSpliceReadChunk  = {int(variant) // 32} * goSlabSize"))
+    replacement.write_text(original.replace(needle, f"goSpliceReadChunk = {int(variant) // 32} * goSlabSize"))
     overlay = directory / "overlay.json"
     overlay.write_text(json.dumps({"Replace": {str(source): str(replacement)}}))
     binary = directory / "native-tun-bench"

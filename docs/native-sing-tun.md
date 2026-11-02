@@ -7,9 +7,9 @@ The existing `tun` inbound and TCP kernel-splice path remain available.
 
 The root module pins the independently maintained
 [dependency fork](https://github.com/Tozward/sing-tun/tree/feature/xray-native-tun)
-at `395f9425830a9991450bd0b26b54ecd5be80e647`. No local checkout is needed to
+at `9af120bbf52457f6c946e4d63587c2bfed57e07e`. No local checkout is needed to
 build it. The original upstream revision alone does not provide the directional APIs.
-The [patch ledger](https://github.com/Tozward/sing-tun/blob/395f9425830a9991450bd0b26b54ecd5be80e647/docs/xray-integration-patches.md)
+The [patch ledger](https://github.com/Tozward/sing-tun/blob/9af120bbf52457f6c946e4d63587c2bfed57e07e/docs/xray-integration-patches.md)
 keeps constructor fixes, directional handoff, borrowed vectors and local aggregation
 separate, with upstream-first retirement criteria.
 
@@ -21,7 +21,7 @@ separate, with upstream-first retirement criteria.
 | Existing SOCKS UDS extension merged onto that baseline | `189fba66acd8da2fa9c2b8df14f798a9a02c1b50` |
 | `github.com/sagernet/sing-tun` | `v0.9.7-0.20261023115453-611d83b7a57b`, commit `611d83b7a57b4719be45581eb674942ff561de6c` |
 | `github.com/sagernet/sing` | `v0.9.7-0.20261023115510-03a6cce64bf7`, commit `03a6cce64bf744023af9e2691fb11afd405b9061` |
-| Local sing-tun dependency | `github.com/Tozward/sing-tun v0.9.7-0.20261102152745-395f9425830a` |
+| Local sing-tun dependency | `github.com/Tozward/sing-tun v0.9.7-0.20261102183854-9af120bbf524` |
 
 The SagerNet pins were selected from sing-box `v1.15.0-alpha.13`; sing-box is
 provenance, not a runtime dependency. Reviewed alternatives included the existing
@@ -471,3 +471,76 @@ The production corrections retain original server forwarding and protocol
 readiness. Further server splice/batching work requires its own controlled
 experiment and framing, statistics and lifetime review. This audit does not
 expand those upstream paths immediately before Android production testing.
+
+## Follow-up: bounded socket read batches
+
+[Run 41500278151](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41500278151)
+compares 64/128/256KiB socket read limits at source
+`20dbdaa46db10f46e63118f3b00c23878bb101c3`. An isolated copy of the pinned dependency
+and alternate module file keep the module cache and production sources intact.
+The only runtime difference between its three binaries is `goSpliceReadChunk`.
+Source/binary hashes and every raw output are retained in the run's artifact.
+Preparation-only failed runs 41499617699 and 41499964907 produced no measurements
+and are excluded.
+
+The experiment completes 195 samples on one Linux runner: five randomized
+repetitions of nine bulk cases and four mixed-load cases for each batch size.
+All cases use actual TUN MTU9000, GOMAXPROCS=4, Go1.27.3, an Intel Xeon Platinum
+8573C runner and the preceding matched TLS fixtures. Absolute rates are not a
+cross-version comparison with the earlier EPYC runners. Bulk cases assert
+complete directional handoff and above-MTU output.
+Mixed cases verify every connection's MTU/MSS, TLS1.3 and raw upload/download
+warmup before measuring one or four bulk downloads beside a separate 256-byte
+request/response connection for two seconds. Every flow must make progress and
+its final payload must match. Setup and final worker joins remain outside timing.
+
+The selected candidate is **128KiB**, retaining the existing TCP window,
+transmit-capacity and shared-memory budgets. It does not wait for a full batch.
+It can transiently reserve up to one additional 64KiB read chunk where the
+existing budget permits. This applies to the library's directional and full
+socket handoffs, including the SOCKS-backed Sing path; ordinary GoConn reads
+and writes are unchanged.
+Dependency commit `9af120bbf52457f6c946e4d63587c2bfed57e07e` records this as
+ST-PERF-002, with upstream-first replacement criteria. The socket regression
+distinguishes a real read above 64KiB from repeated small reads and checks a
+32KiB capacity, backpressure, acknowledgement/resume, EOF and slab reclamation.
+
+The table reports the median of five *paired percentage changes* against the
+64KiB sample in the same repetition, rather than ratios of independent medians.
+CPU includes application TLS endpoints and the local Vision server.
+
+| 128KiB case | Throughput change | CPU change |
+| --- | ---: | ---: |
+| Plain TCP download | +9.93% | -6.11% |
+| Plain TCP duplex | +7.38% | -6.49% |
+| Vision download | +0.77% | -3.82% |
+| Vision duplex | +0.38% | -1.49% |
+| Four direct-TLS downloads with small requests | +7.53% | not measured |
+| Four Vision downloads with small requests | +6.97% | not measured |
+
+Plain download throughput and Vision download CPU improve in all five paired
+samples. Both four-flow workloads improve throughput in all five samples; their
+slowest-flow medians improve 7.44% and 6.52%, with Jain fairness at least 0.9997.
+Single direct-TLS download throughput has a -2.47% paired median and +0.34% CPU;
+single upload and TLS duplex gains are small and mixed. This is a workload-specific
+batching tradeoff, not a uniform throughput or latency improvement.
+
+Four-flow p99 request latency changes +0.34% (direct TLS) and +3.06% (Vision),
+while p50 improves 5.53% and 5.00%. With one saturated Vision download, the
+median observed worst scheduling gap increases from 3.511 to 4.514ms and fewer
+probes complete. Ticker probes can drop ticks; latency percentiles describe
+emitted requests and must be read alongside probe count and worst gap. Boundary
+completion snapshots can include a small partial-interval effect. No Android
+throughput, VPN-process CPU or battery saving is established by this Linux run.
+
+256KiB increases some bulk rates further, but direct-TLS four-flow p95 latency
+is worse in all five pairs (median +6.28%), and single-flow request p50 increases
+in all five pairs for both TLS paths. It is not selected for the phone candidate.
+The ordinary remote Vision server copier remains untouched: changing a local
+fixture server would not accelerate an unchanged remote official Xray node.
+
+This follow-up also fixes unsupported unconnected Unix datagrams at the native
+handoff boundary. Their absent remote address now declines before touching the
+native stream. Both directions reproduce the former panic and now preserve the
+original descriptor and queued datagram. Connected datagrams still decline;
+TCP/Unix streams and protocol readiness retain their preceding behavior.

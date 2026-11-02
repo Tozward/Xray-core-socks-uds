@@ -1,11 +1,5 @@
-github.com/Tozward/sing-tun v0.9.7-0.20261102081331-b65f5e94c698 h1:8QBEvX+M++XGs+c+AT82jGMse5MaANnVzlVoSKTOR/8=
-github.com/Tozward/sing-tun v0.9.7-0.20261102081331-b65f5e94c698/go.mod h1:liMb9HPIWcFWqF6VJ/ttIY8fTSRPdRltBeSeEcXt1Dk=
-github.com/Tozward/sing-tun v0.9.7-0.20261102124819-22c7747ac677 h1:Rxdoobg7bpc8p8HYJ3mbN66xcVjI61lFCdF7o80TSsM=
-github.com/Tozward/sing-tun v0.9.7-0.20261102124819-22c7747ac677/go.mod h1:liMb9HPIWcFWqF6VJ/ttIY8fTSRPdRltBeSeEcXt1Dk=
-github.com/Tozward/sing-tun v0.9.7-0.20261102125620-3855ec8dcf9c h1:lahpDDWKcApmVk0Rsn+5hAxxVRkVXt6RnNZ0/VVek0c=
-github.com/Tozward/sing-tun v0.9.7-0.20261102125620-3855ec8dcf9c/go.mod h1:liMb9HPIWcFWqF6VJ/ttIY8fTSRPdRltBeSeEcXt1Dk=
-github.com/Tozward/sing-tun v0.9.7-0.20261102152745-395f9425830a h1:HJ36cddI23Yu4WFWC1YLTp5c/UwYiLzQseVLI/OcwbM=
-github.com/Tozward/sing-tun v0.9.7-0.20261102152745-395f9425830a/go.mod h1:liMb9HPIWcFWqF6VJ/ttIY8fTSRPdRltBeSeEcXt1Dk=
+github.com/Tozward/sing-tun v0.9.7-0.20261102183854-9af120bbf524 h1:9et/44U7cT8yy3l0DsF/Nh4bX6nCVA2vcdoWhPWceuM=
+github.com/Tozward/sing-tun v0.9.7-0.20261102183854-9af120bbf524/go.mod h1:liMb9HPIWcFWqF6VJ/ttIY8fTSRPdRltBeSeEcXt1Dk=
 github.com/andybalholm/brotli v1.2.3 h1:8H1qwOkl2LPfjf3YezB90JnCliZb6SInJ/OJkEbA5NQ=
 github.com/andybalholm/brotli v1.2.3/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/apernet/quic-go v0.61.1-0.20260806010916-184d081eef3e h1:5mgtR5gwIgBKMiGI1QdXldZZ+SNor06Nbu1wCBulQBg=
