@@ -1,5 +1,5 @@
-github.com/Tozward/sing-tun v0.9.7-0.20261102183854-9af120bbf524 h1:9et/44U7cT8yy3l0DsF/Nh4bX6nCVA2vcdoWhPWceuM=
-github.com/Tozward/sing-tun v0.9.7-0.20261102183854-9af120bbf524/go.mod h1:liMb9HPIWcFWqF6VJ/ttIY8fTSRPdRltBeSeEcXt1Dk=
+github.com/Tozward/sing-tun v0.9.7-0.20261102194020-2c2f8b289bf6 h1:gW+DY8hbDRbFaNSJMTKf6Vj+EvZTBCKXEG9JiLYrC8U=
+github.com/Tozward/sing-tun v0.9.7-0.20261102194020-2c2f8b289bf6/go.mod h1:liMb9HPIWcFWqF6VJ/ttIY8fTSRPdRltBeSeEcXt1Dk=
 github.com/andybalholm/brotli v1.2.3 h1:8H1qwOkl2LPfjf3YezB90JnCliZb6SInJ/OJkEbA5NQ=
 github.com/andybalholm/brotli v1.2.3/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/apernet/quic-go v0.61.1-0.20260806010916-184d081eef3e h1:5mgtR5gwIgBKMiGI1QdXldZZ+SNor06Nbu1wCBulQBg=

@@ -7,7 +7,9 @@ import (
 	stdnet "net"
 	"sync"
 
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/features/routing"
@@ -23,6 +25,8 @@ type udpDispatcher struct {
 	cancel     context.CancelFunc
 	disp       routing.Dispatcher
 	clientAddr stdnet.Addr
+	closed     bool
+	workers    sync.WaitGroup
 }
 
 func newUDPDispatcher(ctx context.Context, clientAddr stdnet.Addr, conn stdnet.Conn, disp routing.Dispatcher) *udpDispatcher {
@@ -37,13 +41,40 @@ func newUDPDispatcher(ctx context.Context, clientAddr stdnet.Addr, conn stdnet.C
 	}
 }
 
+func (d *udpDispatcher) Close() error {
+	d.cancel()
+	err := d.conn.Close()
+	d.Lock()
+	d.closed = true
+	links := d.links
+	d.links = nil
+	d.Unlock()
+	for _, link := range links {
+		common.Interrupt(link.Reader)
+		common.Interrupt(link.Writer)
+	}
+	d.workers.Wait()
+	return err
+}
+
+// Dispatch takes ownership of payload on success and failure, like buf.Writer.
 func (d *udpDispatcher) Dispatch(dest net.Destination, payload buf.MultiBuffer) error {
 	d.RLock()
+	if d.closed {
+		d.RUnlock()
+		buf.ReleaseMulti(payload)
+		return errors.New("UDP association is closed")
+	}
 	link, ok := d.links[dest]
 	d.RUnlock()
 
 	if !ok {
 		d.Lock()
+		if d.closed {
+			d.Unlock()
+			buf.ReleaseMulti(payload)
+			return errors.New("UDP association is closed")
+		}
 		link, ok = d.links[dest]
 		if !ok {
 			// 为独立的 UDP Destination 创建专属 Access Log 记录
@@ -56,11 +87,13 @@ func (d *udpDispatcher) Dispatch(dest net.Destination, payload buf.MultiBuffer) 
 			newLink, err := d.disp.Dispatch(udpCtx, dest)
 			if err != nil {
 				d.Unlock()
+				buf.ReleaseMulti(payload)
 				return err
 			}
 			link = newLink
 			d.links[dest] = link
-			go d.handleDownlink(dest, link.Reader) // 并发监听下行回包
+			d.workers.Add(1)
+			go d.handleDownlink(dest, link)
 		}
 		d.Unlock()
 	}
@@ -68,14 +101,19 @@ func (d *udpDispatcher) Dispatch(dest net.Destination, payload buf.MultiBuffer) 
 	return link.Writer.WriteMultiBuffer(payload)
 }
 
-func (d *udpDispatcher) handleDownlink(dest net.Destination, reader buf.Reader) {
+func (d *udpDispatcher) handleDownlink(dest net.Destination, link *transport.Link) {
+	defer d.workers.Done()
 	defer func() {
+		common.Interrupt(link.Reader)
+		common.Interrupt(link.Writer)
 		d.Lock()
-		delete(d.links, dest)
+		if d.links[dest] == link {
+			delete(d.links, dest)
+		}
 		d.Unlock()
 	}()
 
-	// 优化 1：针对固定的目标地址，在循环外预先计算基础 Header，完全消除循环内因为拼接带来的内存分配
+	// Reuse the destination header for each packet on this link.
 	var atyp byte
 	var addr []byte
 	if dest.Address.Family().IsIPv4() {
@@ -96,40 +134,45 @@ func (d *udpDispatcher) handleDownlink(dest net.Destination, reader buf.Reader) 
 	binary.BigEndian.PutUint16(portBuf, uint16(dest.Port))
 	baseHeader = append(baseHeader, portBuf...)
 
-	// 预分配带有长度位（前 2 字节）的头缓冲区，供循环内极速复用
+	// The association serializes complete frames, including their length prefix.
 	hdrBuf := make([]byte, 2+len(baseHeader))
 	copy(hdrBuf[2:], baseHeader)
 
 	for {
-		mb, err := reader.ReadMultiBuffer()
-		if err != nil {
-			return
-		}
+		mb, err := link.Reader.ReadMultiBuffer()
 
 		d.wMutex.Lock()
 		for i, b := range mb {
+			if int(b.Len()) > 65535-len(baseHeader) {
+				b.Release()
+				continue
+			}
 			totalLen := uint16(len(baseHeader) + int(b.Len()))
 			binary.BigEndian.PutUint16(hdrBuf[:2], totalLen)
 
-			// 优化 2：利用 net.Buffers 触发底层 writev 机制（0 次 Payload 拷贝，1 次 Syscall）
+			// Keep payload storage separate; eligible sockets can use writev.
 			buffers := stdnet.Buffers{hdrBuf, b.Bytes()}
 			if _, err := buffers.WriteTo(d.conn); err != nil {
-				// 优化 3：检测到写入失败，释放剩余内存并立刻退出，防止 Goroutine 空转泄露
 				for j := i; j < len(mb); j++ {
 					mb[j].Release()
 				}
 				d.wMutex.Unlock()
+				d.cancel()
+				_ = d.conn.Close()
 				return
 			}
 			b.Release()
 		}
 		d.wMutex.Unlock()
+		if err != nil {
+			return
+		}
 	}
 }
 
 func handleUDPOverStream(ctx context.Context, clientAddr stdnet.Addr, conn stdnet.Conn, dispatcher routing.Dispatcher) error {
 	disp := newUDPDispatcher(ctx, clientAddr, conn, dispatcher)
-	defer disp.cancel()
+	defer disp.Close()
 
 	lenBuf := make([]byte, 2)
 	for {
@@ -139,11 +182,9 @@ func handleUDPOverStream(ctx context.Context, clientAddr stdnet.Addr, conn stdne
 		}
 		pktLen := binary.BigEndian.Uint16(lenBuf)
 
-		// Xray 的 UDP 架构硬性限制：单包必须存放在单个 buf.Buffer 内（容量 2KB）。
-		// 遇到超大包不能 return error，否则会切断整条 UDS 流导致断网
+		// Preserve this protocol's fixed-size input contract and frame boundary.
 		if int32(pktLen) > buf.Size {
-			// 安全策略：将超大包从流中完整读取并静默丢弃，保持 UDS 字节流边界同步。
-			// (大型 UDP 应当由客户端的 Tun 接口设置 MTU=1500 在 IP 层自动切片解决)
+			// Discard the entire oversized frame so the next packet stays aligned.
 			if _, err := io.CopyN(io.Discard, conn, int64(pktLen)); err != nil {
 				return err
 			}
@@ -218,8 +259,6 @@ func handleUDPOverStream(ctx context.Context, clientAddr stdnet.Addr, conn stdne
 		payload.Advance(int32(offset))
 
 		// 4. 交给分发器打到对应的远端 UDP 地址
-		if err := disp.Dispatch(dest, buf.MultiBuffer{payload}); err != nil {
-			payload.Release()
-		}
+		_ = disp.Dispatch(dest, buf.MultiBuffer{payload})
 	}
 }

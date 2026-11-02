@@ -82,6 +82,17 @@ func kernelDeviceMTU(t testing.TB, mtu int) (int, string, netip.Addr, netip.Addr
 	if err = netlink.LinkSetUp(link); err != nil {
 		t.Fatal(err)
 	}
+	// Android may place auto-created IPv6 prefix routes in an interface table
+	// rather than main. Only add this disposable link's prefix, after it is up.
+	_, destination, err := net.ParseCIDR(netip.PrefixFrom(ip6, 126).Masked().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = netlink.RouteAdd(&netlink.Route{
+		LinkIndex: link.Attrs().Index, Dst: destination, Table: unix.RT_TABLE_MAIN,
+	}); err != nil && !os.IsExist(err) {
+		t.Fatal(err)
+	}
 	t.Setenv(platform.TunFdKey, strconv.Itoa(fd))
 	return fd, ifr.Name(), ip4, ip6
 }

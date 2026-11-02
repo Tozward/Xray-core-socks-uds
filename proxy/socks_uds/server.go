@@ -1,9 +1,11 @@
 package socks_uds
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
@@ -11,6 +13,8 @@ import (
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/task"
+	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport/internet/stat"
 )
@@ -20,11 +24,15 @@ func newError(values ...interface{}) error {
 }
 
 type Server struct {
-	config *ServerConfig
+	config        *ServerConfig
+	policyManager policy.Manager
 }
 
 func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
-	return &Server{config: config}, nil
+	return &Server{
+		config:        config,
+		policyManager: core.MustFromContext(ctx).GetFeature(policy.ManagerType()).(policy.Manager),
+	}, nil
 }
 
 func (s *Server) Network() []net.Network {
@@ -33,6 +41,11 @@ func (s *Server) Network() []net.Network {
 
 func (s *Server) Process(ctx context.Context, network net.Network, connection stat.Connection, dispatcher routing.Dispatcher) error {
 	defer connection.Close()
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stop()
+	if err := connection.SetReadDeadline(time.Now().Add(s.policyManager.ForLevel(0).Timeouts.Handshake)); err != nil {
+		errors.LogInfoInner(ctx, err, "failed to set handshake deadline")
+	}
 
 	var readBuf [1]byte
 	readByte := func() (byte, error) {
@@ -57,6 +70,10 @@ func (s *Server) Process(ctx context.Context, network net.Network, connection st
 	methods := make([]byte, int(nMethods))
 	if _, err := io.ReadFull(connection, methods); err != nil {
 		return newError("failed to read methods")
+	}
+	if !bytes.Contains(methods, []byte{0x00}) {
+		_, _ = connection.Write([]byte{0x05, 0xff})
+		return newError("no supported authentication method")
 	}
 
 	// 2. 回复无认证 (0x05 0x00)
@@ -120,6 +137,9 @@ func (s *Server) Process(ctx context.Context, network net.Network, connection st
 		dest = net.TCPDestination(net.IPAddress(ip), net.PortFromBytes(portBuf))
 	default:
 		return newError("unknown ATYP")
+	}
+	if err := connection.SetReadDeadline(time.Time{}); err != nil {
+		errors.LogInfoInner(ctx, err, "failed to clear handshake deadline")
 	}
 
 	ctx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
