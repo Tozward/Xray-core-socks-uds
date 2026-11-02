@@ -160,6 +160,58 @@ unmeasured. This update changes benchmarks/documentation only; the delivered APK
 and its runtime core remain unchanged. The extended workflow requires all 30
 measurements and rejects failed subcases.
 
+### Matched virtual MTU follow-up
+
+[Run 41427523421](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41427523421)
+tests benchmark source `e47eddce6a613926716c1ba0a64b6d8df10a8b71` at both
+MTU1500 and MTU9000. This run uses Linux amd64 Intel Xeon Platinum 8370C,
+GOMAXPROCS=4. Compare rows within this run; its CPU differs from both earlier runs.
+The workload remains 4MiB upload plus 4MiB echo per operation, three two-second
+samples, verified Vision readiness, and quiet steady-state measurement. All 20
+cases produced three successful measurements. Default/tagged focused checks,
+race/vet, builds and official format/protobuf checks also passed.
+
+Both the actual TUN interface and each stack receive the named MTU. Each
+connection asserts and reports its kernel path MTU and negotiated TCP MSS.
+Pinned HEV/lwIP caps advertised MSS at 8191, so its measured MSS is 1460/8191;
+Sing negotiates 1448/8948, including its timestamp option. Those implementation
+differences are retained rather than changing the production HEV build.
+
+| MTU | Path | freedom MB/s | freedom CPU ms/op | Vision MB/s | Vision CPU ms/op |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1500 | HEV, Android defaults | 678.85 | 23.39 | 599.83 | 40.80 |
+| 9000 | HEV, Android defaults | 1096.06 | 19.19 | 913.22 | 29.81 |
+| 1500 | HEV, jumbo disabled | 237.31 | 37.50 | 222.79 | 56.38 |
+| 9000 | HEV, jumbo disabled | 301.35 | 23.27 | 324.74 | 32.75 |
+| 1500 | Sing via SOCKS/full engine Splice | 413.62 | 37.99 | 414.56 | 53.35 |
+| 9000 | Sing via SOCKS/full engine Splice | 1109.61 | 20.29 | 848.30 | 32.02 |
+| 1500 | Sing direct/ordinary I/O | 526.56 | 41.13 | 482.20 | 51.03 |
+| 9000 | Sing direct/ordinary I/O | 980.99 | 21.43 | 820.49 | 32.06 |
+| 1500 | Sing direct/eligible download handoff | 455.37 | 37.10 | 393.79 | 47.82 |
+| 9000 | Sing direct/eligible download handoff | 836.10 | 20.97 | 912.81 | 29.08 |
+
+These are aggregate duplex MB/s, not download speeds. CPU includes the Go
+process and HEV child; child accounting has OS clock-tick granularity. Small
+CPU differences are not evidence of an Android battery advantage. At MTU9000,
+native handoff and default HEV have essentially equal Vision throughput here;
+HEV remains faster for the freedom workload. The MTU1500 results alone do not
+establish that Sing is slower under its larger virtual-MTU configuration.
+
+Sing's existing large-MTU support is separate from HEV's headerless local
+TCP jumbo beyond the configured MTU. The audited sing-tun revision exposes no
+independent switch for that HEV mechanism. This follow-up uses existing APIs;
+it adds no local coalescing extension and does not enable virtio/GSO on Android's
+plain descriptor. The reference
+[sing-box Android default is 9000](https://github.com/SagerNet/sing-box/blob/v1.15.0-alpha.13/protocol/tun/inbound.go),
+with a source comment about ENOBUFS on some devices at 65535.
+
+The existing v2rayNG GUI MTU already feeds Android Builder, the SOCKS-backed
+Sing controller and generated native sing-tun settings. Normal GUI changes
+request a full VPN restart. Explicit custom inbounds continue to own their raw
+MTU setting. This follow-up changes tests/documentation only; existing app
+defaults and runtime dependency pins remain unchanged. Physical Android/ARM
+throughput and energy measurements remain outstanding.
+
 ## Configuration and host responsibilities
 
 This is a portless inbound; omit `listen` and `port`. A minimal example is:
