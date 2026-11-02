@@ -40,6 +40,7 @@ var (
 		"hysteria":      func() interface{} { return new(HysteriaServerConfig) },
 		"masque":        func() interface{} { return new(MasqueServerConfig) },
 		"tun":           func() interface{} { return new(TunConfig) },
+		"sing-tun":      func() interface{} { return new(SingTunConfig) },
 	}, "protocol", "settings")
 
 	outboundConfigLoader = NewJSONConfigLoader(ConfigCreatorCache{
@@ -147,7 +148,7 @@ func (c *InboundDetourConfig) Build() (*core.InboundHandlerConfig, error) {
 	receiverSettings := &proxyman.ReceiverConfig{}
 
 	// TUN inbound doesn't need port configuration as it uses network interface instead
-	if strings.ToLower(c.Protocol) == "tun" {
+	if protocol := strings.ToLower(c.Protocol); protocol == "tun" || protocol == "sing-tun" {
 		// Skip port validation for TUN
 	} else if c.ListenOn == nil || len(c.ListenOn.String()) == 0 {
 		// Listen on anyip, must set PortList

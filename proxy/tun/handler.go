@@ -75,6 +75,23 @@ func (w *TCPWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	return nil
 }
 
+// ReadFromRaw retains inbound accounting when a native stack takes over the
+// already-unframed download stream. Other writers decline without consuming it.
+func (w *TCPWriter) ReadFromRaw(ctx context.Context, source net.Conn, progress func(int64)) (int64, bool, error) {
+	reader, ok := w.Writer.(buf.RawReaderFrom)
+	if !ok {
+		return 0, false, nil
+	}
+	return reader.ReadFromRaw(ctx, source, func(n int64) {
+		if w.Counter != nil {
+			w.Counter.Add(n)
+		}
+		if progress != nil {
+			progress(n)
+		}
+	})
+}
+
 // ConnectionHandler interface with the only method that stack is going to push new connections to
 type ConnectionHandler interface {
 	HandleConnection(conn net.Conn, destination net.Destination)
@@ -211,11 +228,18 @@ func (t *Handler) Start() error {
 
 // HandleConnection pass the connection coming from the ip stack to the routing dispatcher
 func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
+	t.HandleConnectionContext(t.ctx, conn, destination)
+}
+
+// HandleConnectionContext dispatches a connection owned by another TUN stack.
+// The caller supplies its lifecycle context; metadata, policy and accounting
+// remain those of this inbound handler.
+func (t *Handler) HandleConnectionContext(parent context.Context, conn net.Conn, destination net.Destination) {
 	// when handling is done with any outcome, always signal back to the incoming connection
 	// to close, send completion packets back to the network, and cleanup
 	defer conn.Close()
 
-	ctx, cancel := context.WithCancel(t.ctx)
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	ctx = c.ContextWithID(ctx, session.NewID())
 
@@ -229,6 +253,10 @@ func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
 		User: &protocol.MemoryUser{
 			Level: t.config.UserLevel,
 		},
+	}
+	if _, ok := conn.(buf.RawReaderFrom); ok {
+		inbound.Conn = conn
+		inbound.CanSpliceCopy = 1
 	}
 
 	ctx = session.ContextWithInbound(ctx, &inbound)

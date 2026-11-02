@@ -1,0 +1,66 @@
+name: Native sing-tun verification
+
+on:
+  push:
+    branches: [feature/native-sing-tun]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Ordinary build remains independent of sing-tun
+        shell: bash
+        run: |
+          if go list -deps ./main | grep -q '^github.com/sagernet/sing'; then
+            echo 'Default binary unexpectedly links optional GPL dependencies'
+            exit 1
+          fi
+          go build -o default-xray${{ runner.os == 'Windows' && '.exe' || '' }} ./main
+          go test ./proxy ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf
+      - name: Native tests and race checks
+        shell: bash
+        run: |
+          go test -race -tags with_sing_tun ./proxy ./proxy/singtun ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf -timeout=5m
+          go vet -tags with_sing_tun ./proxy/singtun ./proxy
+      - name: Native CLI build
+        shell: bash
+        run: go build -tags with_sing_tun -trimpath -o native-xray${{ runner.os == 'Windows' && '.exe' || '' }} ./main
+      - name: Linux native descriptor and real Vision regressions
+        if: runner.os == 'Linux'
+        run: |
+          go test -race -tags with_sing_tun -c ./proxy/singtun -o native-tun-test
+          sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 ./native-tun-test -test.v -test.run '^TestNativeKernel' -test.count=3 -test.timeout=3m
+      - name: Linux matched-path benchmark
+        if: runner.os == 'Linux'
+        run: |
+          go test -tags with_sing_tun -c ./proxy/singtun -o native-tun-bench
+          sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 ./native-tun-bench -test.run '^$' -test.bench '^BenchmarkKernel' -test.benchmem -test.benchtime=2s -test.count=3 -test.timeout=10m | tee native-benchmark.txt
+          test "${PIPESTATUS[0]}" = 0
+      - name: Preserve benchmark evidence
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-benchmark-${{ github.sha }}
+          path: native-benchmark.txt
+          if-no-files-found: ignore
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go run ./infra/vformat/main.go -mode check -pwd ./
+      - run: go run ./infra/vprotogen/main.go -mode check -pwd ./

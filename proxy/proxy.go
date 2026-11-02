@@ -737,11 +737,12 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 	readerConn, readCounter, _ := UnwrapRawConn(readerConn)
 	writerConn, _, writeCounter := UnwrapRawConn(writerConn)
 	reader := buf.NewReader(readerConn)
-	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
+	_, native := writerConn.(buf.RawReaderFrom)
+	if !native && runtime.GOOS != "linux" && runtime.GOOS != "android" {
 		return readV(ctx, reader, writer, timer, readCounter)
 	}
 	tc, ok := writerConn.(*net.TCPConn)
-	if !ok || readerConn == nil || writerConn == nil {
+	if (!ok && !native) || readerConn == nil || writerConn == nil {
 		return readV(ctx, reader, writer, timer, readCounter)
 	}
 	inbound := session.InboundFromContext(ctx)
@@ -768,6 +769,33 @@ func CopyRawConnIfExist(ctx context.Context, readerConn net.Conn, writerConn net
 			}
 		}
 		if splice {
+			if native {
+				// This is the same readiness boundary as kernel splice: Vision
+				// has removed padding and drained TLS/prefetched data first.
+				// The endpoint takes only the download direction; the caller
+				// continues to own the original socket and its upload direction.
+				if target, ok := writer.(buf.RawReaderFrom); ok {
+					_, handled, err := target.ReadFromRaw(ctx, readerConn, func(n int64) {
+						if readCounter != nil {
+							readCounter.Add(n)
+						}
+						if writeCounter != nil {
+							writeCounter.Add(n)
+						}
+						timer.Update()
+						if inTimer != nil {
+							inTimer.Update()
+						}
+					})
+					if handled {
+						if err != nil && errors.Cause(err) != io.EOF {
+							return err
+						}
+						return nil
+					}
+				}
+				return readV(ctx, reader, writer, timer, readCounter)
+			}
 			errors.LogDebug(ctx, "CopyRawConn splice")
 			statWriter, _ := writer.(*dispatcher.SizeStatWriter)
 			//runtime.Gosched() // necessary

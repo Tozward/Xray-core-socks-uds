@@ -2,6 +2,7 @@ name: Tests and Checkings
 
 on:
   push:
+    branches-ignore: [feature/native-sing-tun]
   pull_request:
     types: [opened, synchronize, reopened]
 

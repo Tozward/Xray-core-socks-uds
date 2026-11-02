@@ -5,6 +5,7 @@ on:
   release:
     types: [published]
   push:
+    branches-ignore: [feature/native-sing-tun]
   pull_request:
     types: [opened, synchronize, reopened]
 

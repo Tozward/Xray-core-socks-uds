@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package xray.proxy.singtun;
+option csharp_namespace = "Xray.Proxy.Singtun";
+option go_package = "github.com/xtls/xray-core/proxy/singtun";
+option java_package = "com.xray.proxy.singtun";
+option java_multiple_files = true;
+
+message Config {
+  string name = 1;
+  uint32 mtu = 2;
+  repeated string address = 3;
+  uint32 user_level = 4;
+  bool gso = 5;
+  bool multi_queue = 6;
+}
