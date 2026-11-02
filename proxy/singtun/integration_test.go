@@ -116,6 +116,10 @@ func memoryPeer(t *testing.T, handler *Handler) *stun.Go {
 }
 
 func echoTCP(t testing.TB) int {
+	return serveTCP(t, func(conn net.Conn) { _, _ = io.Copy(conn, conn) })
+}
+
+func serveTCP(t testing.TB, serve func(net.Conn)) int {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -124,6 +128,7 @@ func echoTCP(t testing.TB) int {
 	var mu sync.Mutex
 	var active []net.Conn
 	accepted := make(chan struct{})
+	var workers sync.WaitGroup
 	go func() {
 		defer close(accepted)
 		for {
@@ -134,17 +139,19 @@ func echoTCP(t testing.TB) int {
 			mu.Lock()
 			active = append(active, conn)
 			mu.Unlock()
-			go func() { defer conn.Close(); _, _ = io.Copy(conn, conn) }()
+			workers.Add(1)
+			go func() { defer workers.Done(); defer conn.Close(); serve(conn) }()
 		}
 	}()
 	t.Cleanup(func() {
 		_ = listener.Close()
 		<-accepted
 		mu.Lock()
-		defer mu.Unlock()
 		for _, conn := range active {
 			_ = conn.Close()
 		}
+		mu.Unlock()
+		workers.Wait()
 	})
 	return listener.Addr().(*net.TCPAddr).Port
 }

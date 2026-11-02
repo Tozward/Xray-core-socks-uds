@@ -147,10 +147,6 @@ func TestNativeKernelFDAndRawTransfer(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertNativeHandoff(t)
-			_ = conn.CloseWrite()
-			if _, err := io.Copy(io.Discard, conn); err != nil {
-				t.Fatal("native FIN: ", err)
-			}
 			_ = conn.Close()
 		}
 		assertCounter(t, instance, "inbound>>>"+integrationTag+">>>traffic>>>downlink", 1)
@@ -168,6 +164,42 @@ func TestNativeKernelFDAndRawTransfer(t *testing.T) {
 		if flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || flags&unix.FD_CLOEXEC == 0 {
 			t.Fatalf("core closed or changed the host-owned descriptor: %v", err)
 		}
+	}
+}
+
+func TestNativeKernelDownloadEOFDoesNotCloseUpload(t *testing.T) {
+	_, name, ip4, ip6 := kernelDevice(t)
+	kernelCore(t, memoryCoreConfig(nil), name, ip4, ip6)
+	payload := bytes.Repeat([]byte("download-half"), 4096)
+	results := make(chan error, 2)
+	port := serveTCP(t, func(conn net.Conn) {
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_, err := conn.Write(payload)
+		if err == nil {
+			err = conn.(*net.TCPConn).CloseWrite()
+		}
+		actual := make([]byte, 6)
+		if err == nil {
+			_, err = io.ReadFull(conn, actual)
+		}
+		if err == nil && string(actual) != "upload" {
+			err = fmt.Errorf("upload after download EOF: %q", actual)
+		}
+		results <- err
+	})
+	for _, ip := range []netip.Addr{ip4, ip6} {
+		conn := kernelDial(t, ip, port)
+		actual, err := io.ReadAll(conn)
+		if err != nil || !bytes.Equal(actual, payload) {
+			t.Fatalf("native download EOF %s: bytes=%d err=%v", ip, len(actual), err)
+		}
+		if _, err = conn.Write([]byte("upload")); err != nil {
+			t.Fatal("native download EOF closed independent upload: ", err)
+		}
+		if err = <-results; err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.Close()
 	}
 }
 
