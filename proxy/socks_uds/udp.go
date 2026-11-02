@@ -103,7 +103,7 @@ func (d *udpDispatcher) handleDownlink(dest net.Destination, reader buf.Reader) 
 	for {
 		mb, err := reader.ReadMultiBuffer()
 		if err != nil {
-			return 
+			return
 		}
 
 		d.wMutex.Lock()
@@ -121,7 +121,7 @@ func (d *udpDispatcher) handleDownlink(dest net.Destination, reader buf.Reader) 
 				d.wMutex.Unlock()
 				return
 			}
-			b.Release() 
+			b.Release()
 		}
 		d.wMutex.Unlock()
 	}

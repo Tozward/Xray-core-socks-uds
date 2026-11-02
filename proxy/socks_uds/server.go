@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport/internet/stat"
 )
@@ -42,51 +42,81 @@ func (s *Server) Process(ctx context.Context, network net.Network, connection st
 
 	// 1. SOCKS5 握手认证
 	b, err := readByte()
-	if err != nil { return newError("failed to read version") }
-	if b != 0x05 { return newError("unexpected version") }
-	
+	if err != nil {
+		return newError("failed to read version")
+	}
+	if b != 0x05 {
+		return newError("unexpected version")
+	}
+
 	nMethods, err := readByte()
-	if err != nil { return newError("failed to read methods count") }
-	
+	if err != nil {
+		return newError("failed to read methods count")
+	}
+
 	methods := make([]byte, int(nMethods))
 	if _, err := io.ReadFull(connection, methods); err != nil {
 		return newError("failed to read methods")
 	}
 
 	// 2. 回复无认证 (0x05 0x00)
-	if _, err := connection.Write([]byte{0x05, 0x00}); err != nil { return err }
+	if _, err := connection.Write([]byte{0x05, 0x00}); err != nil {
+		return err
+	}
 
 	// 3. 读取请求
 	b, err = readByte()
-	if err != nil || b != 0x05 { return newError("failed to read request version") }
+	if err != nil || b != 0x05 {
+		return newError("failed to read request version")
+	}
 	cmd, err := readByte()
-	if err != nil { return newError("failed to read request cmd") }
+	if err != nil {
+		return newError("failed to read request cmd")
+	}
 	_, err = readByte() // 跳过 RSV
-	if err != nil { return newError("failed to skip RSV") }
+	if err != nil {
+		return newError("failed to skip RSV")
+	}
 	atyp, err := readByte()
-	if err != nil { return newError("failed to read request atyp") }
+	if err != nil {
+		return newError("failed to read request atyp")
+	}
 
 	var dest net.Destination
 	switch atyp {
 	case 0x01: // IPv4
 		ip := make([]byte, 4)
-		if _, err := io.ReadFull(connection, ip); err != nil { return err }
+		if _, err := io.ReadFull(connection, ip); err != nil {
+			return err
+		}
 		portBuf := make([]byte, 2)
-		if _, err := io.ReadFull(connection, portBuf); err != nil { return err }
+		if _, err := io.ReadFull(connection, portBuf); err != nil {
+			return err
+		}
 		dest = net.TCPDestination(net.IPAddress(ip), net.PortFromBytes(portBuf))
 	case 0x03: // Domain
 		domainLen, err := readByte()
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		domain := make([]byte, int(domainLen))
-		if _, err := io.ReadFull(connection, domain); err != nil { return err }
+		if _, err := io.ReadFull(connection, domain); err != nil {
+			return err
+		}
 		portBuf := make([]byte, 2)
-		if _, err := io.ReadFull(connection, portBuf); err != nil { return err }
+		if _, err := io.ReadFull(connection, portBuf); err != nil {
+			return err
+		}
 		dest = net.TCPDestination(net.DomainAddress(string(domain)), net.PortFromBytes(portBuf))
 	case 0x04: // IPv6
 		ip := make([]byte, 16)
-		if _, err := io.ReadFull(connection, ip); err != nil { return err }
+		if _, err := io.ReadFull(connection, ip); err != nil {
+			return err
+		}
 		portBuf := make([]byte, 2)
-		if _, err := io.ReadFull(connection, portBuf); err != nil { return err }
+		if _, err := io.ReadFull(connection, portBuf); err != nil {
+			return err
+		}
 		dest = net.TCPDestination(net.IPAddress(ip), net.PortFromBytes(portBuf))
 	default:
 		return newError("unknown ATYP")
@@ -123,7 +153,9 @@ func (s *Server) Process(ctx context.Context, network net.Network, connection st
 		resp = append(resp, []byte(localAddr)...)
 		resp = append(resp, 0x00, 0x00)
 
-		if _, err := connection.Write(resp); err != nil { return err }
+		if _, err := connection.Write(resp); err != nil {
+			return err
+		}
 
 		// 不关闭连接，全移交给 UDP 流处理器
 		return handleUDPOverStream(ctx, connection.RemoteAddr(), connection, dispatcher)
@@ -139,7 +171,7 @@ func (s *Server) handleTCP(ctx context.Context, dest net.Destination, connection
 		connection.Write([]byte{0x05, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 		return err
 	}
-	
+
 	// 立即回吐 TCP 成功包
 	if _, err := connection.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); err != nil {
 		common.Interrupt(link.Reader)
