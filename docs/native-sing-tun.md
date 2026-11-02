@@ -69,6 +69,47 @@ two-way handoff is faster, or that sing-tun is universally faster than another
 stack or a SOCKS bridge. Compare eligible raw, encrypted and multiplexed paths
 separately on the target platform.
 
+## Measured comparison
+
+[Verification run 41414853301](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41414853301)
+tests implementation `fca55ba917df7919439897d0d462652cf559a64c`. Default and
+tagged focused regressions, race checks and CLI builds pass on Linux, macOS and
+Windows. Linux additionally runs actual TUN descriptor/restart, download EOF
+with independent upload, and verified TLS 1.3 Vision handoff tests three times.
+The separate dependency regression run is
+[41411565431](https://github.com/Tozward/sing-tun/actions/runs/41411565431).
+
+The Linux amd64 benchmark uses an AMD EPYC 7763 with GOMAXPROCS=4, MTU 1500 and
+no GSO. Each operation uploads 4 MiB and reads its 4 MiB echo. All rows use the
+same stack, Xray outbound and counters; Vision also uses the same verified local
+node and inner TLS application. Setup and handshakes are excluded. Every Vision
+case must complete its actual command-2 transitions before bulk warmup. Logging
+is disabled while measuring. Values below are per-metric medians of three
+two-second samples; throughput is aggregate duplex, CPU includes all local
+client/node/application threads, and B/op measures allocations, not live RSS.
+
+| Outbound | Path | MB/s | CPU ms/op | B/op |
+| --- | --- | ---: | ---: | ---: |
+| freedom | SOCKS + full engine Splice | 291.53 | 55.97 | 157359 |
+| freedom | Native Read/Write | 339.65 | 64.54 | 201072 |
+| freedom | Native download handoff | 312.52 | 53.64 | 342691 |
+| Vision TLS 1.3 | SOCKS + full engine Splice | 281.31 | 76.14 | 289838 |
+| Vision TLS 1.3 | Native Read/Write | 325.88 | 73.34 | 271510 |
+| Vision TLS 1.3 | Native download handoff | 300.80 | 68.06 | 418115 |
+
+These samples show a throughput/CPU/allocation tradeoff, not a universal winner.
+The native handoff uses less CPU here but allocates more bytes; ordinary native
+I/O reaches greater throughput. Neither comparison measures HEV, Android/ARM,
+idle wakeups, mobile radio energy, WAN performance or many concurrent flows.
+Keep alternative paths and defaults available until target-device measurements
+justify changing them. The native handoff remains conditional on protocol
+readiness and platform support.
+
+The earlier benchmark artifact from run 41413298407 is invalid for performance
+conclusions: some Vision connections remained framed and two handoff assertions
+failed. It is excluded. The final workflow rejects failed subcases and requires
+all 18 measured rows, in addition to checking the process exit status.
+
 ## Configuration and host responsibilities
 
 This is a portless inbound; omit `listen` and `port`. A minimal example is:
