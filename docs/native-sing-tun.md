@@ -86,6 +86,66 @@ two-way handoff is faster, or that sing-tun is universally faster than another
 stack or a SOCKS bridge. Compare eligible raw, encrypted and multiplexed paths
 separately on the target platform.
 
+## Verified bidirectional handoff and local aggregation
+
+Runtime implementation: `eb5310947c46520eeba7981b8711feb5f8ed9b1a`.
+Verification source: `cdd71da026a0deb6ef0d5130d266a8218979c724`; its only
+changes after the runtime commit are three test files. The Android candidate
+pins the runtime commit, avoiding an AAR rebuild for test-only changes.
+Dependency features are isolated in `22c7747ac677814e46dfd193f2046425c1877794`,
+with the final tested dependency pin `3855ec8dcf9cb1eb3036d334b1ecd5be89b14334`.
+The dependency ledger keeps ST-FD constructor fixes distinct from ST-API-002
+(directional handoff), ST-API-003 (borrowed vectors) and ST-PERF-001 (local TCP
+aggregation), each with its own upstream-first replacement criteria.
+
+[Core verification](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41450401671)
+and [dependency verification](https://github.com/Tozward/sing-tun/actions/runs/41448766157)
+pass on Linux, macOS and Windows. Linux additionally repeats real-TUN direction,
+Vision, ownership, IPv4/IPv6, aggregation and loss-recovery checks three times.
+The default Xray binary still excludes the optional Sing dependencies.
+
+[Complete profiling run](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41450436595)
+contains 51 cases / 153 uninstrumented rows and separate CPU diagnostics.
+One AMD EPYC 7763 runner, Linux/amd64, Go1.27.3, GOMAXPROCS=4, actual MTU9000.
+Each row below is the per-metric median of three two-second measurements, with
+4MiB upload plus its 4MiB echo per operation. Throughput is aggregate duplex;
+CPU includes the client, local application, local Vision node and HEV child.
+Go allocation metrics exclude HEV's C heap. Setup, protocol transition, packet
+observation and profiling are outside the uninstrumented measurement intervals.
+
+| Path | freedom MB/s | freedom CPU ms/op | Vision MB/s | Vision CPU ms/op |
+| --- | ---: | ---: | ---: | ---: |
+| HEV, Android defaults / jumbo | 748.81 | 30.21 | 705.54 | 39.34 |
+| Sing via SOCKS, no local jumbo | 766.37 | 31.09 | 641.04 | 41.73 |
+| Sing via SOCKS, local jumbo | 785.13 | 29.53 | 653.30 | 40.11 |
+| Native legacy sequential Read/Write | 697.42 | 32.82 | 606.12 | 43.58 |
+| Native legacy download-only handoff | 543.35 | 31.30 | 613.99 | 41.44 |
+| Native vector writes, no handoff | 734.86 | 30.80 | 640.02 | 41.41 |
+| Native bidirectional handoff | 1125.79 | 12.82 | 886.07 | 32.25 |
+| Native bidirectional handoff + local jumbo | 1458.57 | 9.45 | 931.99 | 30.80 |
+
+Legacy controls deliberately hide the new raw capabilities and retain their old
+8KiB sequential adapter. The vector, directional and jumbo paths are separately
+named. Every enabled direction must report actual bulk handoff bytes. Every
+jumbo case observes a real 53740-byte local IP packet during warmup; its observer
+is closed and joined before timing. The upload-only workload uses a separate
+verified download warmup, since its ordinary completion reply is just one byte.
+
+The one-way freedom upload changes from 481.96MB/s / 21.33ms CPU / 1632 Go
+allocations per 4MiB in the old download-only integration to 1337.99MB/s /
+6.04ms / 64 allocations with bidirectional handoff and jumbo. The standalone
+engine upload control reaches 1350.09MB/s / 5.99ms / 64 allocations in this run.
+This isolates removal of the old Xray upload conversion. Borrowed vector writes
+also improve the ordinary download fallback without transferring buffer ownership.
+
+These are local Linux measurements, not Android power measurements. The optimized
+native path has higher duplex throughput and lower duplex CPU than HEV here;
+Vision download alone is close to SOCKS+jumbo (648.71 vs 642.85MB/s) and its CPU
+is slightly higher than HEV (10.77 vs 10.62ms per 4MiB). Small differences do not
+establish a winner. Raw readiness remains conditional, and unchanged encrypted,
+fragmented, multiplexed or unsupported paths keep their ordinary copier. No
+background polling, automatic backend switch or new tuning UI is introduced.
+
 ## Measured comparison
 
 [Verification run 41414853301](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41414853301)
