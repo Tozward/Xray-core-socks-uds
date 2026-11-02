@@ -142,7 +142,13 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, mtu int, config *core.Co
 	}); err != nil {
 		b.Fatal(err)
 	}
-	if queryErr != nil || pathMTU != mtu || mss < mtu-60 || mss > mtu-40 {
+	maxMSS := mtu - 40
+	if mode == "hev_android_defaults" || mode == "hev_no_jumbo" {
+		// APK-pinned lwIP advertises TCP_MSS=8191 even on a larger interface.
+		// Retain that production limit and report its negotiated value.
+		maxMSS = min(maxMSS, 8191)
+	}
+	if queryErr != nil || pathMTU != mtu || mss < maxMSS-20 || mss > maxMSS {
 		b.Fatalf("MTU/MSS mismatch: requested=%d path=%d mss=%d error=%v", mtu, pathMTU, mss, queryErr)
 	}
 	var conn net.Conn = raw
