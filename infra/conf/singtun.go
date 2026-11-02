@@ -7,12 +7,13 @@ import (
 )
 
 type SingTunConfig struct {
-	Name       string   `json:"name"`
-	MTU        uint32   `json:"mtu"`
-	Address    []string `json:"address"`
-	UserLevel  uint32   `json:"userLevel"`
-	GSO        bool     `json:"gso"`
-	MultiQueue bool     `json:"multiQueue"`
+	Name          string   `json:"name"`
+	MTU           uint32   `json:"mtu"`
+	Address       []string `json:"address"`
+	UserLevel     uint32   `json:"userLevel"`
+	GSO           bool     `json:"gso"`
+	MultiQueue    bool     `json:"multiQueue"`
+	TCPLocalJumbo bool     `json:"tcpLocalJumbo"`
 }
 
 func (c *SingTunConfig) Build() (proto.Message, error) {
@@ -21,7 +22,7 @@ func (c *SingTunConfig) Build() (proto.Message, error) {
 	}
 	config := &singtun.Config{
 		Name: c.Name, Mtu: c.MTU, Address: append([]string(nil), c.Address...),
-		UserLevel: c.UserLevel, Gso: c.GSO, MultiQueue: c.MultiQueue,
+		UserLevel: c.UserLevel, Gso: c.GSO, MultiQueue: c.MultiQueue, TcpLocalJumbo: c.TCPLocalJumbo,
 	}
 	if config.Mtu == 0 {
 		config.Mtu = 1500

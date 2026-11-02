@@ -421,8 +421,14 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			}
 		}
 
-		if err := buf.Copy(input, writer, buf.UpdateActivity(timer)); err != nil {
-			return errors.New("failed to process request").Base(err)
+		var copyErr error
+		if destination.Network == net.Network_TCP && h.config.Fragment == nil && useSplice.Load() && proxy.IsRAWTransportWithoutSecurity(conn) {
+			copyErr = proxy.CopyRawUplink(ctx, input, writer, timer, func() net.Conn { return conn })
+		} else {
+			copyErr = buf.Copy(input, writer, buf.UpdateActivity(timer))
+		}
+		if copyErr != nil {
+			return errors.New("failed to process request").Base(copyErr)
 		}
 
 		return nil

@@ -301,6 +301,7 @@ type VisionWriter struct {
 	// internal
 	writeOnceUserUUID  []byte
 	directWriteCounter stats.Counter
+	uplinkRaw          bool
 
 	testseed []uint32
 }
@@ -400,12 +401,27 @@ func (w *VisionWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	if err := w.Writer.WriteMultiBuffer(mb); err != nil {
 		return err
 	}
+	if w.isUplink && *switchToDirectCopy {
+		// The final command-2 padding is now committed. Only this writer's
+		// goroutine observes the sticky state; download readiness is separate.
+		w.uplinkRaw = true
+	}
 	if spliceReadyInbound != nil && spliceReadyInbound.CanSpliceCopy == 2 {
 		// Enable splice only after this write has completed to avoid racing
 		// concurrent direct writes to the same TCP connection.
 		spliceReadyInbound.CanSpliceCopy = 1
 	}
 	return nil
+}
+
+// RawUplinkTarget is called by the owning uploader after its buffered header
+// and payload writer has been flushed. It never polls the downloader's flags.
+func (w *VisionWriter) RawUplinkTarget() net.Conn {
+	if !w.isUplink || !w.uplinkRaw {
+		return nil
+	}
+	SuppressOuterCloseNotify(w.conn)
+	return w.conn
 }
 
 // IsCompleteRecord Is complete tls data record

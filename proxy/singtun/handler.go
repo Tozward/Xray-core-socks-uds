@@ -110,7 +110,8 @@ func (h *Handler) startDevice(device stun.Tun, options stun.Options) (*stackSess
 		Logger: options.Logger, UDPTimeout: time.Minute, ICMPTimeout: 10 * time.Second,
 		// A destination receives its own routing/sniffing decision. A second UDP
 		// destination must not inherit the first destination's selected outbound.
-		UDPMapping: stun.NATMappingAddressAndPortDependent,
+		UDPMapping:    stun.NATMappingAddressAndPortDependent,
+		TCPLocalJumbo: h.config.TcpLocalJumbo,
 	})
 	if err == nil {
 		err = device.Start()

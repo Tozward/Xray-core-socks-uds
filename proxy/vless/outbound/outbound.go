@@ -305,6 +305,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		request.Address = net.DomainAddress("v1.mux.cool")
 		request.Port = net.Port(666)
 	}
+	// Capture transport eligibility before either task starts. CanSpliceCopy
+	// later changes in the downloader and is not an upload-readiness signal.
+	nativeUplink := requestAddons.Flow == vless.XRV && request.Command == protocol.RequestCommandTCP && ob.CanSpliceCopy != 3
 
 	postRequest := func() error {
 		defer timer.SetTimeout(sessionPolicy.Timeouts.DownlinkOnly)
@@ -354,7 +357,12 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 				}
 			}
 		}
-		err := buf.Copy(clientReader, serverWriter, buf.UpdateActivity(timer))
+		var err error
+		if vision, ok := serverWriter.(*proxy.VisionWriter); ok && nativeUplink {
+			err = proxy.CopyRawUplink(ctx, clientReader, serverWriter, timer, vision.RawUplinkTarget)
+		} else {
+			err = buf.Copy(clientReader, serverWriter, buf.UpdateActivity(timer))
+		}
 		if err != nil {
 			return errors.New("failed to transfer request payload").Base(err)
 		}

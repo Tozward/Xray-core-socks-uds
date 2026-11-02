@@ -7,8 +7,11 @@ The existing `tun` inbound and TCP kernel-splice path remain available.
 
 The root module pins the independently maintained
 [dependency fork](https://github.com/Tozward/sing-tun/tree/feature/xray-native-tun)
-at `b65f5e94c698d7bea70950fdcc54dd3cb1514a58`. No local checkout is needed to
-build it. The original upstream revision alone does not provide `SpliceDownload`.
+at `3855ec8dcf9cb1eb3036d334b1ecd5be89b14334`. No local checkout is needed to
+build it. The original upstream revision alone does not provide the directional APIs.
+The [patch ledger](https://github.com/Tozward/sing-tun/blob/3855ec8dcf9cb1eb3036d334b1ecd5be89b14334/docs/xray-integration-patches.md)
+keeps constructor fixes, directional handoff, borrowed vectors and local aggregation
+separate, with upstream-first retirement criteria.
 
 ## Examined baselines and dependencies
 
@@ -18,13 +21,13 @@ build it. The original upstream revision alone does not provide `SpliceDownload`
 | Existing SOCKS UDS extension merged onto that baseline | `189fba66acd8da2fa9c2b8df14f798a9a02c1b50` |
 | `github.com/sagernet/sing-tun` | `v0.9.7-0.20261023115453-611d83b7a57b`, commit `611d83b7a57b4719be45581eb674942ff561de6c` |
 | `github.com/sagernet/sing` | `v0.9.7-0.20261023115510-03a6cce64bf7`, commit `03a6cce64bf744023af9e2691fb11afd405b9061` |
-| Local sing-tun dependency | `github.com/Tozward/sing-tun v0.9.7-0.20261102081331-b65f5e94c698` |
+| Local sing-tun dependency | `github.com/Tozward/sing-tun v0.9.7-0.20261102125620-3855ec8dcf9c` |
 
 The SagerNet pins were selected from sing-box `v1.15.0-alpha.13`; sing-box is
 provenance, not a runtime dependency. Reviewed alternatives included the existing
 Xray TUN stack, a TUN-to-SOCKS TCP/UDS bridge, direct `NewGo` connections, and
 native socket handoff. This implementation keeps Xray routing and protocol
-processing while using direct connections and eligible download handoff.
+processing while using direct connections and independently eligible raw handoff.
 
 Xray's repository [license](../LICENSE) is MPL-2.0. The optional backend links
 [sing-tun](https://github.com/SagerNet/sing-tun/blob/611d83b7a57b4719be45581eb674942ff561de6c/LICENSE)
@@ -43,17 +46,31 @@ metadata, inbound policy/statistics, sniffing, access logging and synchronous
 `DispatchLink`. It does not start a second Xray TUN device.
 
 - **TCP before raw readiness:** native `GoConn.Read` fills Xray pooled buffers;
-  writes enter native send storage through `GoConn.Write`. These operations
+  writes borrow multi-buffer slices through `GoConn.WriteVector`, entering the
+  writer once per batch and copying into its existing retransmission storage.
+  No Xray buffer is retained or transferred into another pool. These operations
   include copies. There is no end-to-end zero-copy claim.
 - **Eligible raw TCP download:** after the existing freedom/Vision readiness
   checks, including Vision padding removal and draining prefetched TLS bytes,
   `CopyRawConnIfExist` can call the optional `RawReaderFrom` interface.
   [`tcpConn`](../proxy/singtun/tcp.go) invokes the local dependency's
   `GoConn.SpliceDownload`: the engine reads a duplicated raw TCP/stream-UDS
-  descriptor directly into native send storage. Upload continues through normal
-  Xray processing and the original socket. EOF releases the duplicate and
-  completes the download half independently; cancellation closes the owned
-  native connection. Counter wrappers and activity updates remain in this path.
+  descriptor directly into native send storage. EOF completes only the download
+  half; cancellation closes the owned native connection. Counter wrappers and
+  activity updates remain in this path.
+- **Eligible raw TCP upload:** freedom without fragmentation, or Vision after a
+  successful final command-2 padding write and header flush, can use
+  `CopyRawUplink` / `RawWriterTo`. The uploader observes its own readiness after
+  a complete ordinary read/write batch; it never polls download state. Sniff and
+  timed-read caches must be empty before forwarding the handoff. `SpliceUpload`
+  sends native receive storage directly to the same raw socket, with independent
+  completion and half-close. Either direction may attach or finish first.
+- **Optional local TCP aggregation:** `tcpLocalJumbo` defaults to false. An
+  explicit Linux/Android local-delivery configuration permits TCP data aggregates
+  on verified plain TUN devices, only to an exact configured interface address.
+  Callers must prevent forwarding/NAT of these replies. Software checksums,
+  bounded packet sizes, unchanged MSS/congestion units and loss/error fallback
+  preserve the ordinary TCP contract. UDP and virtio/GSO devices are unchanged.
 - **UDP:** mappings depend on client and destination address/port, giving each
   destination its own routing decision. Reply filtering is endpoint-independent.
   Uplink packets are copied once into Xray-owned buffers with independent
@@ -63,7 +80,7 @@ metadata, inbound policy/statistics, sniffing, access logging and synchronous
   and valid alternate reply-source addresses are preserved.
 
 SagerNet's full `GoConn.Splice` is bidirectional engine-owned socket I/O. Neither
-it nor `SpliceDownload` means Linux `splice(2)`. The existing TCP kernel-splice
+it nor the directional APIs mean Linux `splice(2)`. The existing TCP kernel-splice
 branch in Xray is separate and unchanged. There is no evidence here that a
 two-way handoff is faster, or that sing-tun is universally faster than another
 stack or a SOCKS bridge. Compare eligible raw, encrypted and multiplexed paths
@@ -122,8 +139,8 @@ Xray and how TCP bytes are moved. They are not three APK selector entries.
 | Native download handoff | Same direct dispatcher path; eligible raw download socket is read by the native engine | Sing native TUN, conditional TCP optimization |
 | HEV | TUN → HEV/lwIP → loopback SOCKS → Xray dispatcher/outbound | HEV TUN |
 
-The native APK option starts with normal I/O and uses download handoff only
-after Xray permits it. Upload retains Xray processing. Unsupported conditions
+The native APK option starts with normal I/O and hands over each direction only
+after Xray permits it. Unsupported conditions
 keep normal I/O. UDP uses its own adapter and is not a SpliceDownload path.
 The APK preserves the previously saved backend; installing it does not select
 Sing native automatically.
@@ -280,7 +297,7 @@ dependency, or an equivalent workspace during development.
 Apply this exact replacement in an embedding consumer's root `go.mod` as well:
 
 ```go
-replace github.com/sagernet/sing-tun => github.com/Tozward/sing-tun v0.9.7-0.20261102081331-b65f5e94c698
+replace github.com/sagernet/sing-tun => github.com/Tozward/sing-tun v0.9.7-0.20261102125620-3855ec8dcf9c
 ```
 
 Do not publish a build that silently resolves to the unpatched upstream pin or
@@ -298,7 +315,7 @@ path. Packet adapter microbenchmarks do not establish end-to-end throughput or
 CPU improvement. Existing Xray copy paths do not forward zero-length UDP packets.
 
 Maintain the dependency independently using its
-[patch ledger](https://github.com/Tozward/sing-tun/blob/b65f5e94c698d7bea70950fdcc54dd3cb1514a58/docs/xray-integration-patches.md).
+[patch ledger](https://github.com/Tozward/sing-tun/blob/3855ec8dcf9cb1eb3036d334b1ecd5be89b14334/docs/xray-integration-patches.md).
 The ledger separates constructor
 fixes `ST-FD-001`–`ST-FD-004` from download API extension `ST-API-001`.
 

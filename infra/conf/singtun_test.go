@@ -22,6 +22,13 @@ func TestSingTunConfigurationAndPortlessInbound(t *testing.T) {
 	if native.Mtu != 1500 || native.Name == "" || native.UserLevel != 7 || len(native.Address) != 2 {
 		t.Fatalf("configuration lost fields: %v", native)
 	}
+	if native.TcpLocalJumbo {
+		t.Fatal("local TCP aggregation must remain opt-in")
+	}
+	jumbo, err := (&SingTunConfig{Name: "native-test", MTU: 9000, Address: []string{"10.10.14.1/30"}, TCPLocalJumbo: true}).Build()
+	if err != nil || !jumbo.(*singtun.Config).TcpLocalJumbo {
+		t.Fatalf("explicit local aggregation was lost: %v", err)
+	}
 	if _, err := (&InboundDetourConfig{Protocol: "sing-tun", Tag: "native-test"}).Build(); err != nil {
 		t.Fatalf("native inbound incorrectly requires a port: %v", err)
 	}

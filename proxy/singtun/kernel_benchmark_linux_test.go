@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -120,7 +121,7 @@ func BenchmarkKernelNativeProfile(b *testing.B) {
 
 // Keep experimental path additions in this list until they merit baseline CI.
 func kernelBenchmarkProfileModes(transport string) []string {
-	modes := []string{"hev_android_defaults", "socks_full_splice", "native_read_write", "native_download_splice"}
+	modes := []string{"hev_android_defaults", "socks_full_splice", "socks_full_splice_jumbo", "native_read_write", "native_download_splice", "native_vector_write", "native_bidirectional_splice", "native_bidirectional_jumbo"}
 	if transport == "freedom" {
 		modes = append(modes, "sing_direct_engine")
 	}
@@ -139,10 +140,14 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 	fd, name, ip4, ip6 := kernelDeviceMTU(b, mtu)
 	var hev *kernelHEVProcess
 	var socksForwarder *kernelBenchmarkSOCKS
-	var ordinaryForwarder *kernelBenchmarkOrdinary
+	var nativeForwarder *kernelBenchmarkNative
 	var instance *core.Instance
+	var jumboProbe *kernelBenchmarkPacketProbe
+	if mode == "native_bidirectional_jumbo" || mode == "socks_full_splice_jumbo" {
+		jumboProbe = benchmarkKernelPacketProbe(b, name, ip4)
+	}
 	switch mode {
-	case "socks_full_splice", "hev_android_defaults", "hev_no_jumbo":
+	case "socks_full_splice", "socks_full_splice_jumbo", "hev_android_defaults", "hev_no_jumbo":
 		socksPort := visionLoopbackPort(b)
 		config.Inbound = []*core.InboundHandlerConfig{{
 			Tag: integrationTag,
@@ -161,7 +166,7 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 		if err = instance.Start(); err != nil {
 			b.Fatal(err)
 		}
-		if mode != "socks_full_splice" {
+		if mode != "socks_full_splice" && mode != "socks_full_splice_jumbo" {
 			hev = benchmarkStartHEV(b, fd, ip4, ip6, mtu, socksPort, mode == "hev_no_jumbo")
 			break
 		}
@@ -170,20 +175,20 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 			client: singsocks.NewClient(&kernelBenchmarkLoopbackDialer{dialer: net.Dialer{Timeout: 5 * time.Second}},
 				M.Socksaddr{Addr: netip.MustParseAddr("127.0.0.1"), Port: uint16(socksPort)}, singsocks.Version5, "", ""),
 		}
-		benchmarkKernelStack(b, name, ip4, ip6, mtu, context.Background(), socksForwarder, socksForwarder.flowHandler)
-	case "native_read_write":
+		stackConfig := &Config{TcpLocalJumbo: mode == "socks_full_splice_jumbo"}
+		benchmarkKernelStack(b, name, ip4, ip6, mtu, stackConfig, context.Background(), socksForwarder, socksForwarder.flowHandler)
+	case "native_read_write", "native_download_splice", "native_vector_write", "native_bidirectional_splice", "native_bidirectional_jumbo":
 		created, handler := memoryCore(b, config, session.SniffingRequest{})
 		instance = created
-		ordinaryForwarder = &kernelBenchmarkOrdinary{flowHandler: &flowHandler{native: handler.native, mtu: mtu}}
-		benchmarkKernelStack(b, name, ip4, ip6, mtu, handler.ctx, ordinaryForwarder, ordinaryForwarder.flowHandler)
-	case "native_download_splice":
-		instance = kernelCoreMTU(b, config, name, ip4, ip6, mtu)
+		handler.config.TcpLocalJumbo = mode == "native_bidirectional_jumbo"
+		nativeForwarder = &kernelBenchmarkNative{flowHandler: &flowHandler{native: handler.native, mtu: mtu}, mode: mode}
+		benchmarkKernelStack(b, name, ip4, ip6, mtu, handler.config, handler.ctx, nativeForwarder, nativeForwarder.flowHandler)
 	case "sing_direct_engine":
 		socksForwarder = &kernelBenchmarkSOCKS{
 			flowHandler: &flowHandler{},
 			client:      &kernelBenchmarkDirectDialer{kernelBenchmarkLoopbackDialer{dialer: net.Dialer{Timeout: 5 * time.Second}}},
 		}
-		benchmarkKernelStack(b, name, ip4, ip6, mtu, context.Background(), socksForwarder, socksForwarder.flowHandler)
+		benchmarkKernelStack(b, name, ip4, ip6, mtu, nil, context.Background(), socksForwarder, socksForwarder.flowHandler)
 	default:
 		b.Fatalf("unknown benchmark mode %q", mode)
 	}
@@ -246,16 +251,25 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 		b.Fatalf("warmup validation failed: %v", err)
 	}
 	switch mode {
-	case "socks_full_splice", "sing_direct_engine":
+	case "socks_full_splice", "socks_full_splice_jumbo", "sing_direct_engine":
 		if socksForwarder.spliced.Load() != 1 {
 			b.Fatalf("%s did not use NewGo full Splice: %v", mode, socksForwarder.failure())
 		}
-	case "native_read_write":
-		if ordinaryForwarder.connections.Load() != 1 {
-			b.Fatal("ordinary native Read/Write adapter was not used")
+	}
+	if nativeForwarder != nil {
+		nativeForwarder.assertHandoff(b)
+	}
+	if jumboProbe != nil {
+		if err := jumboProbe.stop(); err != nil {
+			b.Fatal("local jumbo packet observation: ", err)
 		}
-	case "native_download_splice":
-		assertNativeHandoff(b)
+		if jumboProbe.maxPacket.Load() <= uint32(mtu) {
+			b.Fatalf("local jumbo did not emit a TCP packet larger than MTU %d (largest %d)", mtu, jumboProbe.maxPacket.Load())
+		}
+	}
+	var rawUploadBefore, rawDownloadBefore int64
+	if nativeForwarder != nil {
+		rawUploadBefore, rawDownloadBefore = nativeForwarder.rawUpload.Load(), nativeForwarder.rawDownload.Load()
 	}
 	var before, after unix.Rusage
 	var childUserBefore, childSystemBefore float64
@@ -267,6 +281,9 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 	b.ResetTimer()
 	b.ReportMetric(float64(pathMTU), "path-MTU")
 	b.ReportMetric(float64(mss), "local-MSS")
+	if jumboProbe != nil {
+		b.ReportMetric(float64(jumboProbe.maxPacket.Load()), "jumbo-max-IP-B")
+	}
 	stopProfile := benchmarkKernelProfileStart(b)
 	if err := unix.Getrusage(unix.RUSAGE_SELF, &before); err != nil {
 		b.Fatal(err)
@@ -278,6 +295,11 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 		}
 	}
 	b.StopTimer()
+	var rawUpload, rawDownload int64
+	if nativeForwarder != nil {
+		rawUpload = nativeForwarder.rawUpload.Load() - rawUploadBefore
+		rawDownload = nativeForwarder.rawDownload.Load() - rawDownloadBefore
+	}
 	if err := unix.Getrusage(unix.RUSAGE_SELF, &after); err != nil {
 		b.Fatal(err)
 	}
@@ -292,6 +314,20 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 	stopProfile()
 	if err := verify(); err != nil {
 		b.Fatal("measured payload validation: ", err)
+	}
+	if nativeForwarder != nil {
+		b.ReportMetric(float64(rawUpload)/float64(b.N), "native-up-B/op")
+		b.ReportMetric(float64(rawDownload)/float64(b.N), "native-down-B/op")
+		// The final receiver has acknowledged each upload and read each
+		// download. Progress must therefore cover the measured bulk bytes,
+		// rather than merely an attempted capability probe during warmup.
+		expected := int64(kernelBenchmarkPayloadSize) * int64(b.N)
+		if nativeForwarder.uploadEnabled() && workload != "download" && rawUpload < expected {
+			b.Fatalf("native upload handled %d bytes, expected at least %d", rawUpload, expected)
+		}
+		if nativeForwarder.downloadEnabled() && workload != "upload" && rawDownload < expected {
+			b.Fatalf("native download handled %d bytes, expected at least %d", rawDownload, expected)
+		}
 	}
 	b.ReportMetric(user*1000/float64(b.N), "user-ms/op")
 	b.ReportMetric(system*1000/float64(b.N), "sys-ms/op")
@@ -652,7 +688,7 @@ func benchmarkTimevalSeconds(value unix.Timeval) float64 {
 	return float64(value.Sec) + float64(value.Usec)/1e6
 }
 
-func benchmarkKernelStack(b *testing.B, name string, ip4, ip6 netip.Addr, mtu int, parent context.Context, handler stun.Handler, gate *flowHandler) {
+func benchmarkKernelStack(b *testing.B, name string, ip4, ip6 netip.Addr, mtu int, config *Config, parent context.Context, handler stun.Handler, gate *flowHandler) {
 	b.Helper()
 	options := stun.Options{
 		Name: name, MTU: uint32(mtu), DNSMode: stun.DNSModeDisabled, EXP_ExternalConfiguration: true, Logger: logger.NOP(),
@@ -666,7 +702,8 @@ func benchmarkKernelStack(b *testing.B, name string, ip4, ip6 netip.Addr, mtu in
 	stack, err := stun.NewGo(stun.StackOptions{
 		Context: ctx, Tun: device, TunOptions: options, Handler: handler,
 		Logger: logger.NOP(), UDPTimeout: time.Minute, ICMPTimeout: 10 * time.Second,
-		UDPMapping: stun.NATMappingAddressAndPortDependent,
+		UDPMapping:    stun.NATMappingAddressAndPortDependent,
+		TCPLocalJumbo: config.GetTcpLocalJumbo(),
 	})
 	cleanup := func() {
 		gate.stop()
@@ -689,8 +726,98 @@ func benchmarkKernelStack(b *testing.B, name string, ip4, ip6 netip.Addr, mtu in
 	}
 }
 
-// The ordinary comparison hides only optional methods from the production TCP
-// wrapper. Its Read, Write, addresses, cancellation and core dispatch stay the same.
+type kernelBenchmarkPacketProbe struct {
+	maxPacket atomic.Uint32
+	stop      func() error
+}
+
+// Observe actual host receive packets only during warmup. A configured option
+// alone does not prove that the plain-TUN/exact-host jumbo gates were met. The
+// socket and its worker are gone before measurement begins.
+func benchmarkKernelPacketProbe(b testing.TB, name string, destination netip.Addr) *kernelBenchmarkPacketProbe {
+	b.Helper()
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		b.Fatal(err)
+	}
+	protocol := int(binary.NativeEndian.Uint16([]byte{0x08, 0x00})) // ETH_P_IP in network byte order
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, protocol)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Protocol: uint16(protocol), Ifindex: iface.Index}); err != nil {
+		_ = unix.Close(fd)
+		b.Fatal(err)
+	}
+	probe := &kernelBenchmarkPacketProbe{}
+	stop, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		packet := make([]byte, 65535)
+		events := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		run := func() error {
+			for {
+				select {
+				case <-stop:
+					return nil
+				default:
+				}
+				if _, err := unix.Poll(events, 100); err != nil {
+					if errors.Is(err, unix.EINTR) {
+						continue
+					}
+					return err
+				}
+				if events[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+					return fmt.Errorf("packet probe poll event %#x", events[0].Revents)
+				}
+				if events[0].Revents&unix.POLLIN == 0 {
+					continue
+				}
+				n, _, err := unix.Recvfrom(fd, packet, 0)
+				if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				if size := kernelBenchmarkTCPPacketSize(packet[:n], destination); size > probe.maxPacket.Load() {
+					probe.maxPacket.Store(size)
+				}
+			}
+		}
+		err := run()
+		_ = unix.Close(fd)
+		done <- err
+	}()
+	var once sync.Once
+	var closeErr error
+	probe.stop = func() error {
+		once.Do(func() { close(stop); closeErr = <-done })
+		return closeErr
+	}
+	b.Cleanup(func() { _ = probe.stop() })
+	return probe
+}
+
+func kernelBenchmarkTCPPacketSize(packet []byte, destination netip.Addr) uint32 {
+	if len(packet) < 40 || packet[0]>>4 != 4 || packet[9] != 6 || netip.AddrFrom4([4]byte(packet[16:20])) != destination {
+		return 0
+	}
+	header := int(packet[0]&0xf) * 4
+	total := int(binary.BigEndian.Uint16(packet[2:4]))
+	if header < 20 || total > len(packet) || total < header+20 || binary.BigEndian.Uint16(packet[6:8])&0x3fff != 0 {
+		return 0
+	}
+	tcpHeader := int(packet[header+12]>>4) * 4
+	if tcpHeader < 20 || total <= header+tcpHeader {
+		return 0
+	}
+	return uint32(total)
+}
+
+// These wrappers freeze the old controls: an 8KiB SingleReader and sequential
+// GoConn.Write, with only download capability exposed in the download control.
+// New production capabilities must not silently change those historical paths.
 type kernelBenchmarkPlainConn struct {
 	net.Conn
 	writer buf.Writer
@@ -700,12 +827,78 @@ func (c *kernelBenchmarkPlainConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	return c.writer.WriteMultiBuffer(mb)
 }
 
-type kernelBenchmarkOrdinary struct {
-	*flowHandler
-	connections atomic.Uint64
+type kernelBenchmarkDownloadConn struct {
+	*kernelBenchmarkPlainConn
+	native *tcpConn
+	owner  *kernelBenchmarkNative
 }
 
-func (h *kernelBenchmarkOrdinary) NewConnectionEx(ctx context.Context, conn net.Conn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+func (c *kernelBenchmarkDownloadConn) ReadFromRaw(ctx context.Context, source net.Conn, progress func(int64)) (int64, bool, error) {
+	return c.native.ReadFromRaw(ctx, source, func(n int64) {
+		c.owner.rawDownload.Add(n)
+		if progress != nil {
+			progress(n)
+		}
+	})
+}
+
+type kernelBenchmarkBidirectionalConn struct{ *kernelBenchmarkDownloadConn }
+
+func (c *kernelBenchmarkBidirectionalConn) WriteToRaw(ctx context.Context, target net.Conn, progress func(int64)) (int64, bool, error) {
+	return c.native.WriteToRaw(ctx, target, func(n int64) {
+		c.owner.rawUpload.Add(n)
+		if progress != nil {
+			progress(n)
+		}
+	})
+}
+
+type kernelBenchmarkNative struct {
+	*flowHandler
+	mode        string
+	connections atomic.Uint64
+	rawUpload   atomic.Int64
+	rawDownload atomic.Int64
+}
+
+func (h *kernelBenchmarkNative) uploadEnabled() bool {
+	return h.mode == "native_bidirectional_splice" || h.mode == "native_bidirectional_jumbo"
+}
+
+func (h *kernelBenchmarkNative) downloadEnabled() bool {
+	return h.mode == "native_download_splice" || h.uploadEnabled()
+}
+
+func (h *kernelBenchmarkNative) wrap(native *tcpConn) net.Conn {
+	var writer buf.Writer = native
+	if h.mode == "native_read_write" || h.mode == "native_download_splice" {
+		writer = &buf.SequentialWriter{Writer: native.GoConn}
+	}
+	plain := &kernelBenchmarkPlainConn{Conn: native, writer: writer}
+	if !h.downloadEnabled() {
+		return plain
+	}
+	download := &kernelBenchmarkDownloadConn{kernelBenchmarkPlainConn: plain, native: native, owner: h}
+	if h.uploadEnabled() {
+		return &kernelBenchmarkBidirectionalConn{download}
+	}
+	return download
+}
+
+func (h *kernelBenchmarkNative) assertHandoff(b testing.TB) {
+	b.Helper()
+	if h.connections.Load() != 1 {
+		b.Fatalf("%s adapter received %d connections", h.mode, h.connections.Load())
+	}
+	if got := h.rawUpload.Load(); (got > 0) != h.uploadEnabled() {
+		b.Fatalf("%s native upload bytes=%d (enabled=%v)", h.mode, got, h.uploadEnabled())
+	}
+	if got := h.rawDownload.Load(); (got > 0) != h.downloadEnabled() {
+		b.Fatalf("%s native download bytes=%d (enabled=%v)", h.mode, got, h.downloadEnabled())
+	}
+}
+
+func (h *kernelBenchmarkNative) NewConnectionEx(ctx context.Context, conn net.Conn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	if !h.begin() {
 		rejectConnection(conn, onClose)
 		return
@@ -715,11 +908,11 @@ func (h *kernelBenchmarkOrdinary) NewConnectionEx(ctx context.Context, conn net.
 	if err == nil {
 		native, ok := conn.(*stun.GoConn)
 		if !ok {
-			err = errors.New("ordinary benchmark did not receive GoConn")
+			err = errors.New("native benchmark did not receive GoConn")
 		} else {
 			wrapped := &tcpConn{GoConn: native, source: source.TCPAddr(), destination: destination.TCPAddr()}
 			h.connections.Add(1)
-			h.native.HandleConnectionContext(ctx, &kernelBenchmarkPlainConn{Conn: wrapped, writer: wrapped}, toDestination(destination, xnet.Network_TCP))
+			h.native.HandleConnectionContext(ctx, h.wrap(wrapped), toDestination(destination, xnet.Network_TCP))
 		}
 	}
 	if err != nil {
@@ -727,6 +920,72 @@ func (h *kernelBenchmarkOrdinary) NewConnectionEx(ctx context.Context, conn net.
 	}
 	if onClose != nil {
 		onClose(err)
+	}
+}
+
+func TestKernelBenchmarkNativeCapabilities(t *testing.T) {
+	for _, mode := range kernelBenchmarkProfileModes("vision_tls13") {
+		if !strings.HasPrefix(mode, "native_") {
+			continue
+		}
+		t.Run(mode, func(t *testing.T) {
+			handler := &kernelBenchmarkNative{mode: mode}
+			native := &tcpConn{GoConn: &stun.GoConn{}}
+			wrapped := handler.wrap(native)
+			_, download := wrapped.(buf.RawReaderFrom)
+			_, upload := wrapped.(buf.RawWriterTo)
+			if download != handler.downloadEnabled() || upload != handler.uploadEnabled() {
+				t.Fatalf("capabilities: download=%v upload=%v", download, upload)
+			}
+			var plain *kernelBenchmarkPlainConn
+			switch wrapped := wrapped.(type) {
+			case *kernelBenchmarkPlainConn:
+				plain = wrapped
+			case *kernelBenchmarkDownloadConn:
+				plain = wrapped.kernelBenchmarkPlainConn
+			case *kernelBenchmarkBidirectionalConn:
+				plain = wrapped.kernelBenchmarkPlainConn
+			default:
+				t.Fatalf("unexpected adapter %T", wrapped)
+			}
+			_, sequential := plain.writer.(*buf.SequentialWriter)
+			if sequential != (mode == "native_read_write" || mode == "native_download_splice") {
+				t.Fatalf("unexpected writer %T", plain.writer)
+			}
+			if reader, ok := buf.NewReader(wrapped).(*buf.SingleReader); !ok || reader.Reader != wrapped {
+				t.Fatalf("control no longer uses ordinary SingleReader: %T", buf.NewReader(wrapped))
+			}
+		})
+	}
+}
+
+func TestKernelBenchmarkTCPPacketSize(t *testing.T) {
+	destination := netip.MustParseAddr("198.19.1.1")
+	packet := make([]byte, 9001)
+	packet[0], packet[9], packet[32] = 0x45, 6, 0x50
+	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+	copy(packet[16:20], destination.AsSlice())
+	if got := kernelBenchmarkTCPPacketSize(packet, destination); got != uint32(len(packet)) {
+		t.Fatalf("packet length=%d", got)
+	}
+	for _, change := range []func([]byte){
+		func(p []byte) { p[9] = 17 },
+		func(p []byte) { p[16] ^= 1 },
+		func(p []byte) { p[6] = 0x20 },
+		func(p []byte) { p[0] = 0x4f },
+		func(p []byte) { p[32] = 0xf0; binary.BigEndian.PutUint16(p[2:4], 40) },
+		func(p []byte) { binary.BigEndian.PutUint16(p[2:4], 65535) },
+	} {
+		modified := bytes.Clone(packet)
+		change(modified)
+		if got := kernelBenchmarkTCPPacketSize(modified, destination); got != 0 {
+			t.Fatalf("invalid/non-TCP packet counted as %d bytes", got)
+		}
+	}
+	for length := range 40 {
+		if got := kernelBenchmarkTCPPacketSize(packet[:length], destination); got != 0 {
+			t.Fatalf("short packet counted as %d bytes", got)
+		}
 	}
 }
 

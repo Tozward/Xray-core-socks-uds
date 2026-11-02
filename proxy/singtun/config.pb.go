@@ -29,6 +29,7 @@ type Config struct {
 	UserLevel     uint32                 `protobuf:"varint,4,opt,name=user_level,json=userLevel,proto3" json:"user_level,omitempty"`
 	Gso           bool                   `protobuf:"varint,5,opt,name=gso,proto3" json:"gso,omitempty"`
 	MultiQueue    bool                   `protobuf:"varint,6,opt,name=multi_queue,json=multiQueue,proto3" json:"multi_queue,omitempty"`
+	TcpLocalJumbo bool                   `protobuf:"varint,7,opt,name=tcp_local_jumbo,json=tcpLocalJumbo,proto3" json:"tcp_local_jumbo,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -105,11 +106,18 @@ func (x *Config) GetMultiQueue() bool {
 	return false
 }
 
+func (x *Config) GetTcpLocalJumbo() bool {
+	if x != nil {
+		return x.TcpLocalJumbo
+	}
+	return false
+}
+
 var File_proxy_singtun_config_proto protoreflect.FileDescriptor
 
 const file_proxy_singtun_config_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproxy/singtun/config.proto\x12\x12xray.proxy.singtun\"\x9a\x01\n" +
+	"\x1aproxy/singtun/config.proto\x12\x12xray.proxy.singtun\"\xc2\x01\n" +
 	"\x06Config\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03mtu\x18\x02 \x01(\rR\x03mtu\x12\x18\n" +
@@ -118,7 +126,8 @@ const file_proxy_singtun_config_proto_rawDesc = "" +
 	"user_level\x18\x04 \x01(\rR\tuserLevel\x12\x10\n" +
 	"\x03gso\x18\x05 \x01(\bR\x03gso\x12\x1f\n" +
 	"\vmulti_queue\x18\x06 \x01(\bR\n" +
-	"multiQueueBX\n" +
+	"multiQueue\x12&\n" +
+	"\x0ftcp_local_jumbo\x18\a \x01(\bR\rtcpLocalJumboBX\n" +
 	"\x16com.xray.proxy.singtunP\x01Z'github.com/xtls/xray-core/proxy/singtun\xaa\x02\x12Xray.Proxy.Singtunb\x06proto3"
 
 var (

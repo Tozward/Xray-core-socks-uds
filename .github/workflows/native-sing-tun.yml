@@ -23,7 +23,7 @@ on:
       profile_path:
         description: Path (direct engine control supports freedom only)
         type: choice
-        options: [all, hev_android_defaults, socks_full_splice, native_read_write, native_download_splice, sing_direct_engine]
+        options: [all, hev_android_defaults, socks_full_splice, socks_full_splice_jumbo, native_read_write, native_download_splice, native_vector_write, native_bidirectional_splice, native_bidirectional_jumbo, sing_direct_engine]
         default: all
       profiler:
         description: Diagnostic instrumentation, separate from timing baseline
@@ -152,7 +152,7 @@ jobs:
       - name: Build focused benchmark and pinned HEV runner
         run: |
           mkdir -p profile-evidence
-          go test -tags with_sing_tun ./proxy/singtun -run '^TestKernelBenchmarkOneWayProtocol$' -count=1
+          go test -tags with_sing_tun ./proxy/singtun -run '^TestKernelBenchmark(OneWayProtocol|NativeCapabilities|TCPPacketSize)$' -count=1
           go test -tags with_sing_tun -c ./proxy/singtun -o profile-evidence/native-tun-bench
           make -C benchmark-deps/hev -j2 static
           cc -O3 -Ibenchmark-deps/hev/include proxy/singtun/testdata/hev_runner.c \
@@ -168,6 +168,11 @@ jobs:
             echo 'Duplex counts 8MiB/op; upload/download count 4MiB/op plus uncounted one-byte controls.'
             echo 'CPU totals include this Go process (application/Xray/local Vision node) and the HEV child.'
             echo 'Go CPU/block/trace profiles exclude HEV child execution and C allocations.'
+            echo 'Legacy native controls retain 8KiB SingleReader/sequential Write; download-only hides raw upload.'
+            echo 'Manual vector and bidirectional paths are separate; only named _jumbo paths explicitly enable local jumbo.'
+            echo 'socks_full_splice_jumbo matches native_bidirectional_jumbo; the historical SOCKS control retains MTU-sized output.'
+            echo 'Raw progress must cover the measured bulk direction; jumbo must emit a real above-MTU TCP receive packet during warmup.'
+            echo 'The jumbo packet observer closes and joins before timing; native progress counters remain active for path accounting.'
             echo 'Diagnostics start after warmup; instrumented results must not be ranked with the baseline.'
             echo 'CPU/trace retain final calibration run; block accumulates measured intervals of one case.'
             echo 'This is a local Linux control, not Android or external-network throughput/energy.'
@@ -186,7 +191,7 @@ jobs:
           set -euo pipefail
           case "$PROFILE_TRANSPORT" in all|freedom|vision_tls13) ;; *) exit 2 ;; esac
           case "$PROFILE_WORKLOAD" in all|duplex|upload|download) ;; *) exit 2 ;; esac
-          case "$PROFILE_PATH" in all|hev_android_defaults|socks_full_splice|native_read_write|native_download_splice|sing_direct_engine) ;; *) exit 2 ;; esac
+          case "$PROFILE_PATH" in all|hev_android_defaults|socks_full_splice|socks_full_splice_jumbo|native_read_write|native_download_splice|native_vector_write|native_bidirectional_splice|native_bidirectional_jumbo|sing_direct_engine) ;; *) exit 2 ;; esac
           case "$PROFILER" in cpu|block|trace) profilers=("$PROFILER") ;; all) profilers=(cpu block trace) ;; *) exit 2 ;; esac
           if [[ "$PROFILE_TRANSPORT" == vision_tls13 && "$PROFILE_PATH" == sing_direct_engine ]]; then
             echo 'The direct engine control bypasses Xray and supports freedom only.'
@@ -197,7 +202,7 @@ jobs:
           for phase in baseline diagnostic; do
           for transport in freedom vision_tls13; do
             [[ "$PROFILE_TRANSPORT" == all || "$PROFILE_TRANSPORT" == "$transport" ]] || continue
-            modes=(hev_android_defaults socks_full_splice native_read_write native_download_splice)
+            modes=(hev_android_defaults socks_full_splice socks_full_splice_jumbo native_read_write native_download_splice native_vector_write native_bidirectional_splice native_bidirectional_jumbo)
             [[ "$transport" != freedom ]] || modes+=(sing_direct_engine)
             for workload in duplex upload download; do
               [[ "$PROFILE_WORKLOAD" == all || "$PROFILE_WORKLOAD" == "$workload" ]] || continue
@@ -245,7 +250,7 @@ jobs:
           for path in baselines:
               result = path.read_text()
               rows = [line for line in result.splitlines() if ' ns/op' in line and ' allocs/op' in line]
-              if len(rows) != 3 or '--- FAIL:' in result or 'SKIP' in result:
+              if len(rows) != 3 or '--- FAIL:' in result or 'WARNING: DATA RACE' in result or 'SKIP' in result:
                   raise SystemExit(f'Incomplete baseline: {path}')
               for row in rows:
                   fields = row.split()
@@ -253,9 +258,24 @@ jobs:
                       raise SystemExit(f'Incorrect actual MTU: {row}')
                   if float(fields[fields.index('cpu-ms/op') - 1]) <= 0:
                       raise SystemExit(f'Missing CPU accounting: {row}')
+                  mode, workload = path.parent.name, path.parents[2].name
+                  if mode.startswith('native_'):
+                      upload = float(fields[fields.index('native-up-B/op') - 1])
+                      download = float(fields[fields.index('native-down-B/op') - 1])
+                      bidirectional = mode in ('native_bidirectional_splice', 'native_bidirectional_jumbo')
+                      if (upload > 0) != bidirectional:
+                          raise SystemExit(f'Unexpected native upload path: {row}')
+                      if (download > 0) != (bidirectional or mode == 'native_download_splice'):
+                          raise SystemExit(f'Unexpected native download path: {row}')
+                      if bidirectional and workload != 'download' and upload < 4 * 1024 * 1024:
+                          raise SystemExit(f'Native upload did not handle bulk data: {row}')
+                      if (bidirectional or mode == 'native_download_splice') and workload != 'upload' and download < 4 * 1024 * 1024:
+                          raise SystemExit(f'Native download did not handle bulk data: {row}')
+                  if mode.endswith('_jumbo') and float(fields[fields.index('jumbo-max-IP-B') - 1]) <= 9000:
+                      raise SystemExit(f'Local jumbo never emitted above-MTU data: {row}')
           for path in root.glob('*/*/mtu_9000/*/*/diagnostic.txt'):
               result = path.read_text()
-              if ' ns/op' not in result or '--- FAIL:' in result or 'SKIP' in result:
+              if ' ns/op' not in result or '--- FAIL:' in result or 'WARNING: DATA RACE' in result or 'SKIP' in result:
                   raise SystemExit(f'Incomplete diagnostic: {path}')
           print(f'Validated {len(baselines)} paths, {3 * len(baselines)} uninstrumented rows')
           PY

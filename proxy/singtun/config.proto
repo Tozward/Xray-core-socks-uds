@@ -13,4 +13,5 @@ message Config {
   uint32 user_level = 4;
   bool gso = 5;
   bool multi_queue = 6;
+  bool tcp_local_jumbo = 7;
 }
