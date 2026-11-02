@@ -24,6 +24,7 @@ import (
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	"github.com/xtls/xray-core/app/router"
 	"github.com/xtls/xray-core/app/stats"
+	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/geodata"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
@@ -180,8 +181,72 @@ func assertCounter(t testing.TB, instance *core.Instance, name string, minimum i
 	t.Helper()
 	manager := instance.GetFeature(statsfeature.ManagerType()).(statsfeature.Manager)
 	counter := manager.GetCounter(name)
-	if counter == nil || counter.Value() < minimum {
-		t.Fatalf("counter %s: %v, want >=%d", name, counter, minimum)
+	if counter == nil {
+		t.Fatalf("counter %s was not registered", name)
+	}
+	// Socket writes become visible to the peer before their callers add traffic
+	// statistics. Receiving an echo therefore does not synchronize this counter.
+	deadline := time.Now().Add(time.Second)
+	value := counter.Value()
+	for value < minimum && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		value = counter.Value()
+	}
+	if value < minimum {
+		t.Fatalf("counter %s: %d, want >=%d", name, value, minimum)
+	}
+}
+
+type deferredUDPTestCounter struct {
+	statsfeature.Counter
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (c *deferredUDPTestCounter) Add(n int64) int64 {
+	close(c.entered)
+	<-c.resume
+	return c.Counter.Add(n)
+}
+
+func TestNativeUDPReplyMayPrecedeOutboundAccounting(t *testing.T) {
+	port := echoUDP(t)
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	counter := &deferredUDPTestCounter{Counter: new(stats.Counter), entered: make(chan struct{}), resume: make(chan struct{})}
+	var once sync.Once
+	resume := func() { once.Do(func() { close(counter.resume) }) }
+	defer resume()
+	writer := &freedom.PacketWriter{
+		PacketConnWrapper: &xnet.PacketConnWrapper{PacketConn: conn, Dest: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}},
+		Counter:           counter,
+	}
+	payload := []byte("reply-before-accounting")
+	written := make(chan error, 1)
+	go func() { written <- writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes(payload)}) }()
+	actual := make([]byte, 100)
+	n, _, err := conn.ReadFromUDP(actual)
+	if err != nil || !bytes.Equal(actual[:n], payload) {
+		t.Fatalf("UDP echo: %q, %v", actual[:n], err)
+	}
+	select {
+	case <-counter.entered:
+	case <-time.After(time.Second):
+		t.Fatal("packet writer did not reach outbound accounting")
+	}
+	if value := counter.Value(); value != 0 {
+		t.Fatalf("counter advanced before write completion was released: %d", value)
+	}
+	resume()
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	if value := counter.Value(); value != int64(len(payload)) {
+		t.Fatalf("outbound accounting lost bytes: %d, want %d", value, len(payload))
 	}
 }
 

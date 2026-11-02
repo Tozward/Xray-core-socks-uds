@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -88,6 +89,9 @@ func TestNativeRawUplinkReadinessFallbackAndCounters(t *testing.T) {
 		{"prefix write failed", true, true, 1, false, true, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if runtime.GOOS != "linux" && runtime.GOOS != "android" && runtime.GOOS != "darwin" {
+				test.wantRaw = false
+			}
 			payload := bytes.Repeat([]byte("native-upload"), 2200)
 			source := &rawUplinkTestSource{Reader: bytes.NewReader(payload), accept: test.accept}
 			var inboundCount, userCount, outboundCount rawTestCounter

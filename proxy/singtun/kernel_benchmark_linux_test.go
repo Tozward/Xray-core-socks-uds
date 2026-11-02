@@ -260,6 +260,12 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 		nativeForwarder.assertHandoff(b)
 	}
 	if jumboProbe != nil {
+		if workload == "upload" {
+			// Upload completion replies contain only one byte. Exercise a
+			// separate bulk receive before timing so the same above-MTU
+			// packet assertion remains meaningful in this one-way case.
+			benchmarkKernelJumboWarmup(b, conn)
+		}
 		if err := jumboProbe.stop(); err != nil {
 			b.Fatal("local jumbo packet observation: ", err)
 		}
@@ -343,6 +349,21 @@ func benchmarkKernelPayload() []byte {
 		payload[index] = byte(index*31 + index>>11)
 	}
 	return payload
+}
+
+func benchmarkKernelJumboWarmup(b testing.TB, conn net.Conn) {
+	b.Helper()
+	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		b.Fatal(err)
+	}
+	if err := benchmarkWriteAll(conn, []byte{'j'}); err != nil {
+		b.Fatal("jumbo receive warmup command: ", err)
+	}
+	payload := benchmarkKernelPayload()
+	received := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, received); err != nil || !bytes.Equal(received, payload) {
+		b.Fatalf("jumbo receive warmup payload: %v", err)
+	}
 }
 
 func benchmarkKernelTraffic(b testing.TB, raw, conn net.Conn, workload string) (transfer, verify func() error, bytesPerOp int64) {
@@ -480,7 +501,7 @@ func benchmarkKernelOneWayServer(conn net.Conn, workload string) (int64, error) 
 			if err := benchmarkWriteAll(conn, []byte{valid}); err != nil {
 				return total, err
 			}
-		case command[0] == 'd' && workload == "download":
+		case command[0] == 'j' || command[0] == 'd' && workload == "download":
 			if err := benchmarkWriteAll(conn, payload); err != nil {
 				return total, err
 			}
@@ -508,6 +529,7 @@ func TestKernelBenchmarkOneWayProtocol(t *testing.T) {
 				done <- result{bytes, err}
 			}()
 			benchmarkSmallRecords(t, client)
+			benchmarkKernelJumboWarmup(t, client)
 			transfer, verify, bytesPerOp := benchmarkKernelTraffic(t, client, client, workload)
 			if bytesPerOp != kernelBenchmarkPayloadSize {
 				t.Fatalf("one-way SetBytes=%d", bytesPerOp)
@@ -522,7 +544,7 @@ func TestKernelBenchmarkOneWayProtocol(t *testing.T) {
 			}
 			_ = client.Close()
 			got := <-done
-			if got.bytes != 2*kernelBenchmarkPayloadSize || !errors.Is(got.err, io.EOF) {
+			if got.bytes != 3*kernelBenchmarkPayloadSize || !errors.Is(got.err, io.EOF) {
 				t.Fatalf("server result=%+v", got)
 			}
 		})
