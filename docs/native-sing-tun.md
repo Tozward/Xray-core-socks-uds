@@ -146,6 +146,14 @@ establish a winner. Raw readiness remains conditional, and unchanged encrypted,
 fragmented, multiplexed or unsupported paths keep their ordinary copier. No
 background polling, automatic backend switch or new tuning UI is introduced.
 
+Without local aggregation, the Vision download-only workload is a tradeoff:
+bidirectional handoff measures 505.52MB/s / 14.44ms CPU against the old download
+handoff's 551.44MB/s / 15.12ms. This does not justify a universal speed claim.
+CPU samples no longer contain the native client's old upload `buf.Copy` /
+`GoConn.Read` chain. Remaining Vision upload copies are in the local fixture's
+server-side freedom outbound, with additional application TLS work. These
+profiles support removal of that client conversion, not end-to-end zero-copy.
+
 ## Measured comparison
 
 [Verification run 41414853301](https://github.com/Tozward/Xray-core-socks-uds/actions/runs/41414853301)
