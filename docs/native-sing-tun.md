@@ -173,6 +173,10 @@ race/vet, builds and official format/protobuf checks also passed.
 
 Both the actual TUN interface and each stack receive the named MTU. Each
 connection asserts and reports its kernel path MTU and negotiated TCP MSS.
+HEV's own constructor/config-file default is 8500, but v2rayNG's TProxyService
+always emits `tunnel.mtu` from the GUI setting (default1500), overriding that
+library default. The MTU9000 rows explicitly set 9000 for HEV as well as Sing;
+they are not a comparison between HEV8500 and Sing9000.
 Pinned HEV/lwIP caps advertised MSS at 8191, so its measured MSS is 1460/8191;
 Sing negotiates 1448/8948, including its timestamp option. Those implementation
 differences are retained rather than changing the production HEV build.
