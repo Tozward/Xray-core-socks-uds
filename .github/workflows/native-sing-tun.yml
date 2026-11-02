@@ -212,7 +212,7 @@ jobs:
                 name="$transport/$workload/mtu_9000/$mode"
                 directory="$PWD/profile-evidence/$name"
                 mkdir -p "$directory"
-                pattern="^BenchmarkKernelNativeProfile$/$transport/$workload/mtu_9000/$mode\$"
+                pattern="^BenchmarkKernelNativeProfile$/^${transport}\$/^${workload}\$/^mtu_9000$/^${mode}\$"
                 if [[ "$phase" == baseline ]]; then
                   sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 XRAY_HEV_BENCHMARK_BINARY="$RUNNER_TEMP/hev-bench" XRAY_HEV_CLOCK_TICKS="$ticks" \
                     profile-evidence/native-tun-bench -test.run '^$' -test.bench "$pattern" -test.benchmem -test.benchtime=2s -test.count=3 -test.timeout=2m \
@@ -243,6 +243,7 @@ jobs:
           done
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           root = Path('profile-evidence')
           baselines = list(root.glob('*/*/mtu_9000/*/baseline.txt'))
@@ -253,8 +254,11 @@ jobs:
               rows = [line for line in result.splitlines() if ' ns/op' in line and ' allocs/op' in line]
               if len(rows) != 3 or '--- FAIL:' in result or 'WARNING: DATA RACE' in result or 'SKIP' in result:
                   raise SystemExit(f'Incomplete baseline: {path}')
+              expected = 'BenchmarkKernelNativeProfile/' + path.parent.relative_to(root).as_posix()
               for row in rows:
                   fields = row.split()
+                  if re.sub(r'-\d+$', '', fields[0]) != expected:
+                      raise SystemExit(f'Benchmark selection did not match its output path: {row}')
                   if int(fields[fields.index('path-MTU') - 1]) != 9000:
                       raise SystemExit(f'Incorrect actual MTU: {row}')
                   if float(fields[fields.index('cpu-ms/op') - 1]) <= 0:
