@@ -8,7 +8,7 @@ on:
       mode:
         description: Verification or focused Linux profiling
         type: choice
-        options: [verify, profile]
+        options: [verify, profile, batch]
         default: verify
       profile_transport:
         description: Profile transport
@@ -36,7 +36,7 @@ permissions:
 
 jobs:
   contracts:
-    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'profile'
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'verify'
     strategy:
       fail-fast: false
       matrix:
@@ -119,7 +119,7 @@ jobs:
           path: native-benchmark.txt
           if-no-files-found: ignore
   format:
-    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'profile'
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'verify'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -291,4 +291,37 @@ jobs:
           name: native-profile-${{ github.sha }}
           path: profile-evidence
           if-no-files-found: ignore
+          retention-days: 14
+  batch:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'batch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Record identical runtime and machine
+        run: |
+          mkdir -p batch-evidence
+          {
+            echo "Core: $GITHUB_SHA"
+            echo 'Same runner; 64/128/256KiB dependency overlays; randomized order, five repetitions.'
+            echo 'Only the readv batch limit changes. Flow windows, memory budgets, TLS and MTU stay fixed.'
+            echo 'Whole-process CPU includes application TLS and the local Vision server.'
+            go version
+            uname -a
+            lscpu
+          } > batch-evidence/environment.txt
+      - name: Compare bounded read batches over actual TUN
+        run: python3 .github/scripts/native_tun_batch.py
+      - name: Preserve complete experiment evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-batch-${{ github.sha }}
+          path: |
+            batch-evidence
+            !batch-evidence/**/native-tun-bench
+          if-no-files-found: error
           retention-days: 14
