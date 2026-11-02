@@ -31,6 +31,7 @@ func (d *associationDispatcher) Dispatch(context.Context, xnet.Destination) (*tr
 	close(d.seen)
 	return d.link, nil
 }
+
 func (*associationDispatcher) DispatchLink(context.Context, xnet.Destination, *transport.Link) error {
 	panic("unexpected DispatchLink")
 }
