@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Verification or focused Linux profiling
+        description: Verification, focused Linux profiling, or native packaging
         type: choice
-        options: [verify, profile, batch]
+        options: [verify, profile, batch, package]
         default: verify
       profile_transport:
         description: Profile transport
@@ -55,12 +55,12 @@ jobs:
             exit 1
           fi
           go build -o default-xray${{ runner.os == 'Windows' && '.exe' || '' }} ./main
-          go test ./proxy ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf
+          go test ./proxy ./proxy/socks_uds ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf
       - name: Native tests and race checks
         shell: bash
         run: |
-          go test -race -tags with_sing_tun ./proxy ./proxy/singtun ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf -timeout=5m
-          go vet -tags with_sing_tun ./proxy/singtun ./proxy
+          go test -race -tags with_sing_tun ./proxy ./proxy/singtun ./proxy/socks_uds ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf -timeout=5m
+          go vet -tags with_sing_tun ./proxy/singtun ./proxy/socks_uds ./proxy
       - name: Native CLI build
         shell: bash
         run: go build -tags with_sing_tun -trimpath -o native-xray${{ runner.os == 'Windows' && '.exe' || '' }} ./main
@@ -292,6 +292,26 @@ jobs:
           path: profile-evidence
           if-no-files-found: ignore
           retention-days: 14
+  package:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'package'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Package explicitly tagged native cores and runtime-linked notices
+        run: python3 .github/scripts/package_native.py
+      - name: Preserve native release archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-core-${{ github.sha }}
+          path: |
+            native-release/*.zip
+            native-release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
   batch:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'batch'
     runs-on: ubuntu-latest
