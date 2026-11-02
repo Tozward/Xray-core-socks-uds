@@ -47,7 +47,7 @@ func (r *rawUplinkReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 	// Starting at a post-write checkpoint also drains the common initial sniff
 	// cache. Wrappers still decline if a later timed read remains pending.
 	if r.readBatch {
-		if target := r.ready(); target != nil {
+		if target := r.ready(); rawUplinkSocket(target) {
 			raw, _, writeCounter := UnwrapRawConn(target)
 			_, handled, err := r.stream.WriteToRaw(r.ctx, raw, func(n int64) {
 				if writeCounter != nil {

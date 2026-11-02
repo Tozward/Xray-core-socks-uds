@@ -63,17 +63,7 @@ type visionServerResult struct {
 func visionCoreConfig(t testing.TB, application ...func(net.Conn) (int64, error)) *visionFixture {
 	t.Helper()
 	ca, outerCert, outerKey, innerCert, innerKey := visionCertificates(t)
-	innerPair, err := tls.X509KeyPair(innerCert, innerKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	innerPort, results := visionTLSServer(t, &tls.Config{
-		Certificates: []tls.Certificate{innerPair}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13,
-	}, application...)
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(ca) {
-		t.Fatal("cannot load test CA")
-	}
+	innerPort, clientTLS, results := visionTLSApplication(t, ca, innerCert, innerKey, application...)
 	port := visionLoopbackPort(t)
 	nodeConfig := memoryCoreConfig(nil)
 	nodeConfig.Inbound = []*core.InboundHandlerConfig{{
@@ -124,9 +114,27 @@ func visionCoreConfig(t testing.TB, application ...func(net.Conn) (int64, error)
 	}}
 	return &visionFixture{
 		Config: clientConfig, Target: netip.AddrPortFrom(netip.MustParseAddr("192.0.2.90"), uint16(innerPort)),
-		ClientTLS:     &tls.Config{RootCAs: roots, ServerName: visionInnerName, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13},
+		ClientTLS:     clientTLS,
 		ServerResults: results,
 	}
+}
+
+// visionTLSApplication is shared with the direct-TLS benchmark control so its
+// certificates, TLS version and application handler are identical to Vision's.
+func visionTLSApplication(t testing.TB, ca, cert, key []byte, application ...func(net.Conn) (int64, error)) (int, *tls.Config, <-chan visionServerResult) {
+	t.Helper()
+	pair, err := tls.X509KeyPair(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, results := visionTLSServer(t, &tls.Config{
+		Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13,
+	}, application...)
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		t.Fatal("cannot load test CA")
+	}
+	return port, &tls.Config{RootCAs: roots, ServerName: visionInnerName, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13}, results
 }
 
 func visionTLSStream(config *transporttls.Config) *internet.StreamConfig {

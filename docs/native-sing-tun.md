@@ -7,9 +7,9 @@ The existing `tun` inbound and TCP kernel-splice path remain available.
 
 The root module pins the independently maintained
 [dependency fork](https://github.com/Tozward/sing-tun/tree/feature/xray-native-tun)
-at `3855ec8dcf9cb1eb3036d334b1ecd5be89b14334`. No local checkout is needed to
+at `395f9425830a9991450bd0b26b54ecd5be80e647`. No local checkout is needed to
 build it. The original upstream revision alone does not provide the directional APIs.
-The [patch ledger](https://github.com/Tozward/sing-tun/blob/3855ec8dcf9cb1eb3036d334b1ecd5be89b14334/docs/xray-integration-patches.md)
+The [patch ledger](https://github.com/Tozward/sing-tun/blob/395f9425830a9991450bd0b26b54ecd5be80e647/docs/xray-integration-patches.md)
 keeps constructor fixes, directional handoff, borrowed vectors and local aggregation
 separate, with upstream-first retirement criteria.
 
@@ -21,7 +21,7 @@ separate, with upstream-first retirement criteria.
 | Existing SOCKS UDS extension merged onto that baseline | `189fba66acd8da2fa9c2b8df14f798a9a02c1b50` |
 | `github.com/sagernet/sing-tun` | `v0.9.7-0.20261023115453-611d83b7a57b`, commit `611d83b7a57b4719be45581eb674942ff561de6c` |
 | `github.com/sagernet/sing` | `v0.9.7-0.20261023115510-03a6cce64bf7`, commit `03a6cce64bf744023af9e2691fb11afd405b9061` |
-| Local sing-tun dependency | `github.com/Tozward/sing-tun v0.9.7-0.20261102125620-3855ec8dcf9c` |
+| Local sing-tun dependency | `github.com/Tozward/sing-tun v0.9.7-0.20261102152745-395f9425830a` |
 
 The SagerNet pins were selected from sing-box `v1.15.0-alpha.13`; sing-box is
 provenance, not a runtime dependency. Reviewed alternatives included the existing
@@ -396,3 +396,30 @@ the raw-download API, EOF/cancellation, UDP ownership/MTU and platform descripto
 contracts; then run both default and tagged Xray tests, dependency platform tests,
 privileged TUN tests and target-platform performance comparisons. Update the
 immutable fork pin, checksums and this document together.
+
+## Production-test audit follow-up
+
+The previous freedom/Vision columns do not isolate Vision's protocol overhead:
+freedom uses a plain TCP echo, while Vision includes verified application TLS1.3
+at both ends and an additional local Xray server/core and forwarding connection.
+The new manual `freedom_tls13` control shares the exact application TLS fixture
+with Vision; only Vision asserts its command-2 transitions. The original default
+benchmark and its historical results retain their original workload definitions.
+Whole-process CPU includes the application endpoints and simulated remote node;
+it must not be presented as Android VPN-process CPU or battery use.
+
+The re-audit reproduced and corrected two local integration boundaries:
+
+- New upload handoff now rejects every TCP mask, including a fragment mask whose
+  `Splice()` is true but whose later writes still require fragmentation. Unknown
+  transports are also retained by the ordinary writer. Known protocol-ready
+  TCP/TLS/REALITY/encryption/stats/Unix wrappers are checked without consuming
+  stream data; existing raw-download unwrapping and Vision's original direct
+  writer are unchanged. Actual fragment packets 2-20 and a transforming mask
+  reproduce the bypass with the old implementation and pass after this guard.
+- Dependency ST-API-004 fixes `CloseRead` while a directional upload remains
+  backpressured after native TCP FIN/ACK completion. It cancels the owned upload
+  and releases retained receive storage, including cancellation queued before
+  the final ACK. Other dead connections, full Splice, CloseWrite and original
+  socket ownership retain their prior behavior. The exact pinned dependency is
+  `395f9425830a9991450bd0b26b54ecd5be80e647`.

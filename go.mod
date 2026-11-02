@@ -82,4 +82,4 @@ tool (
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )
 
-replace github.com/sagernet/sing-tun => github.com/Tozward/sing-tun v0.9.7-0.20261102125620-3855ec8dcf9c
+replace github.com/sagernet/sing-tun => github.com/Tozward/sing-tun v0.9.7-0.20261102152745-395f9425830a

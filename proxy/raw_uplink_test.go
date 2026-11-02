@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	gotls "crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -13,8 +14,33 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
+	"github.com/xtls/xray-core/transport/internet/finalmask/fragment"
 	"github.com/xtls/xray-core/transport/internet/stat"
+	"github.com/xtls/xray-core/transport/internet/tls"
 )
+
+func rawUplinkTCPPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
+	t.Helper()
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_ = listener.SetDeadline(time.Now().Add(3 * time.Second))
+	client, err := net.DialTimeout("tcp4", listener.Addr().String(), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	server, err := listener.AcceptTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = server.SetDeadline(time.Now().Add(3 * time.Second))
+	return client.(*net.TCPConn), server
+}
 
 type rawUplinkTestSource struct {
 	*bytes.Reader
@@ -99,7 +125,7 @@ func TestNativeRawUplinkReadinessFallbackAndCounters(t *testing.T) {
 				Reader:  &buf.TimeoutWrapperReader{Reader: buf.NewReader(source), Counter: &inboundCount},
 				Counter: &userCount,
 			}
-			target, consumer := net.Pipe()
+			target, consumer := rawUplinkTCPPair(t)
 			defer target.Close()
 			defer consumer.Close()
 			_ = target.SetDeadline(time.Now().Add(3 * time.Second))
@@ -152,6 +178,138 @@ func TestNativeRawUplinkReadinessFallbackAndCounters(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type rawUplinkRecordingConn struct {
+	net.Conn
+	writes []int
+}
+
+// Keep the transparent observer traversable by the existing unwrap, so the
+// old decision reaches the real TCP socket just as it does without an observer.
+func (*rawUplinkRecordingConn) TcpMaskConn()        {}
+func (c *rawUplinkRecordingConn) RawConn() net.Conn { return c.Conn }
+func (*rawUplinkRecordingConn) Splice() bool        { return true }
+
+func (c *rawUplinkRecordingConn) Write(p []byte) (int, error) {
+	c.writes = append(c.writes, len(p))
+	return c.Conn.Write(p)
+}
+
+type rawUplinkTransformMask struct {
+	net.Conn
+	writes int
+}
+
+func (*rawUplinkTransformMask) TcpMaskConn()        {}
+func (c *rawUplinkTransformMask) RawConn() net.Conn { return c.Conn }
+func (*rawUplinkTransformMask) Splice() bool        { return true }
+
+func (c *rawUplinkTransformMask) Write(p []byte) (int, error) {
+	c.writes++
+	transformed := bytes.Clone(p)
+	for index := range transformed {
+		transformed[index] ^= 0x20
+	}
+	return c.Conn.Write(transformed)
+}
+
+func TestNativeRawUplinkPreservesWriteMasks(t *testing.T) {
+	for _, name := range []string{"fragment packets 2-20", "transforming splice-true mask"} {
+		t.Run(name, func(t *testing.T) {
+			socket, consumer := rawUplinkTCPPair(t)
+			payload := bytes.Repeat([]byte("abcdefgh"), 3*buf.Size/8)
+			expected := bytes.Clone(payload)
+			var target net.Conn
+			var verifyWrites func()
+			if name == "fragment packets 2-20" {
+				recorded := &rawUplinkRecordingConn{Conn: socket}
+				config := &fragment.Config{
+					PacketsFrom: 2, PacketsTo: 20,
+					LengthsMin: []int64{1024}, LengthsMax: []int64{1024},
+					DelaysMin: []int64{0}, DelaysMax: []int64{0},
+				}
+				var err error
+				target, err = config.WrapConnClient(recorded, nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !IsRAWTransportWithoutSecurity(target) {
+					t.Fatal("fragment does not reproduce the raw eligibility")
+				}
+				raw, _, _ := UnwrapRawConn(target)
+				if raw != socket {
+					t.Fatalf("fragment observer hid the actual TCP socket: %T", raw)
+				}
+				verifyWrites = func() {
+					if len(recorded.writes) != 1+2*buf.Size/1024 || recorded.writes[0] != buf.Size {
+						t.Fatalf("configured packets 2-3 were not fragmented: %v", recorded.writes)
+					}
+					for _, length := range recorded.writes[1:] {
+						if length != 1024 {
+							t.Fatalf("fragmented write length: %d", length)
+						}
+					}
+				}
+			} else {
+				mask := &rawUplinkTransformMask{Conn: socket}
+				target = mask
+				for index := range expected {
+					expected[index] ^= 0x20
+				}
+				verifyWrites = func() {
+					if mask.writes != 3 {
+						t.Fatalf("transforming Write called %d times, want 3", mask.writes)
+					}
+				}
+			}
+			source := &rawUplinkTestSource{Reader: bytes.NewReader(payload), accept: true}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx = session.ContextWithInbound(ctx, &session.Inbound{Conn: source, CanSpliceCopy: 1})
+			ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{}})
+			timer := signal.CancelAfterInactivity(ctx, cancel, 3*time.Second)
+			defer timer.SetTimeout(0)
+			received := make(chan []byte, 1)
+			go func() { data, _ := io.ReadAll(consumer); received <- data }()
+			err := CopyRawUplink(ctx, buf.NewReader(source), buf.NewWriter(target), timer, func() net.Conn { return target })
+			_ = socket.Close()
+			actual := <-received
+			verifyWrites()
+			if err != nil || !bytes.Equal(actual, expected) || source.calls != 0 {
+				t.Fatalf("upload bypassed mask: err=%v raw calls=%d bytes=%d", err, source.calls, len(actual))
+			}
+		})
+	}
+}
+
+type rawUplinkUnknownConn struct{ net.Conn }
+
+func TestNativeRawUplinkSocketEligibility(t *testing.T) {
+	socket, _ := rawUplinkTCPPair(t)
+	tlsSocket := &tls.Conn{Conn: gotls.Client(socket, &gotls.Config{})}
+	for _, conn := range []net.Conn{
+		socket, &stat.CounterConnection{Connection: socket},
+		tlsSocket, &stat.CounterConnection{Connection: tlsSocket},
+	} {
+		if !rawUplinkSocket(conn) {
+			t.Fatalf("known protocol-ready socket refused: %T", conn)
+		}
+		raw, _, _ := UnwrapRawConn(conn)
+		if raw != socket {
+			t.Fatalf("known ready socket unwrap mismatch: %T", raw)
+		}
+	}
+	masked := &rawUplinkTransformMask{Conn: socket}
+	for _, conn := range []net.Conn{
+		nil, &rawUplinkUnknownConn{Conn: socket}, masked,
+		&stat.CounterConnection{Connection: masked},
+		&tls.Conn{Conn: gotls.Client(masked, &gotls.Config{})},
+	} {
+		if rawUplinkSocket(conn) {
+			t.Fatalf("mask or unknown wrapper accepted for upload: %T", conn)
+		}
 	}
 }
 

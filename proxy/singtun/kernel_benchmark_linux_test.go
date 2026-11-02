@@ -70,7 +70,7 @@ func BenchmarkKernelNativeEchoDuplex(b *testing.B) {
 				b.Run(fmt.Sprintf("mtu_%d", mtu), func(b *testing.B) {
 					for _, mode := range []string{"hev_android_defaults", "hev_no_jumbo", "socks_full_splice", "native_read_write", "native_download_splice"} {
 						b.Run(mode, func(b *testing.B) {
-							benchmarkKernelEchoMode(b, mode, "duplex", mtu, proto.Clone(config).(*core.Config), port, applicationTLS)
+							benchmarkKernelEchoMode(b, mode, "duplex", mtu, proto.Clone(config).(*core.Config), port, applicationTLS, profile == "vision_tls13")
 						})
 					}
 				})
@@ -84,7 +84,7 @@ func BenchmarkKernelNativeEchoDuplex(b *testing.B) {
 // One-way cases count only their bulk direction; the one-byte command/completion
 // messages are excluded from SetBytes. Profiling is opt-in and starts after warmup.
 func BenchmarkKernelNativeProfile(b *testing.B) {
-	for _, transport := range []string{"freedom", "vision_tls13"} {
+	for _, transport := range []string{"freedom", "freedom_tls13", "vision_tls13"} {
 		b.Run(transport, func(b *testing.B) {
 			for _, workload := range []string{"duplex", "upload", "download"} {
 				b.Run(workload, func(b *testing.B) {
@@ -101,6 +101,9 @@ func BenchmarkKernelNativeProfile(b *testing.B) {
 					if transport == "vision_tls13" {
 						fixture := visionCoreConfig(b, application...)
 						config, applicationTLS, port = fixture.Config, fixture.ClientTLS, int(fixture.Target.Port())
+					} else if transport == "freedom_tls13" {
+						ca, _, _, cert, key := visionCertificates(b)
+						port, applicationTLS, _ = visionTLSApplication(b, ca, cert, key, application...)
 					} else if len(application) == 0 {
 						port = echoTCP(b)
 					} else {
@@ -109,7 +112,7 @@ func BenchmarkKernelNativeProfile(b *testing.B) {
 					b.Run("mtu_9000", func(b *testing.B) {
 						for _, mode := range kernelBenchmarkProfileModes(transport) {
 							b.Run(mode, func(b *testing.B) {
-								benchmarkKernelEchoMode(b, mode, workload, 9000, proto.Clone(config).(*core.Config), port, applicationTLS)
+								benchmarkKernelEchoMode(b, mode, workload, 9000, proto.Clone(config).(*core.Config), port, applicationTLS, transport == "vision_tls13")
 							})
 						}
 					})
@@ -128,7 +131,7 @@ func kernelBenchmarkProfileModes(transport string) []string {
 	return modes
 }
 
-func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, config *core.Config, port int, applicationTLS *tls.Config) {
+func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, config *core.Config, port int, applicationTLS *tls.Config, isVision bool) {
 	b.Helper()
 	b.StopTimer()
 	// Xray's log handler is shared by cores in this process. The client logger
@@ -218,18 +221,22 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 	if queryErr != nil || pathMTU != mtu || mss < maxMSS-20 || mss > maxMSS {
 		b.Fatalf("MTU/MSS mismatch: requested=%d path=%d mss=%d error=%v", mtu, pathMTU, mss, queryErr)
 	}
-	var conn net.Conn = raw
-	if applicationTLS != nil {
-		quiet, ok := instance.GetFeature((*applog.Instance)(nil)).(*applog.Instance)
+	var quiet *applog.Instance
+	var probe *kernelBenchmarkVisionProbe
+	if isVision {
+		var ok bool
+		quiet, ok = instance.GetFeature((*applog.Instance)(nil)).(*applog.Instance)
 		if !ok {
 			b.Fatal("benchmark core has no quiet logger")
 		}
-		// Observe protocol output only while warming up. No readiness state is
-		// written or sampled across goroutines. Restore the known core-owned
-		// logger before any bulk transfer, including on an early benchmark failure.
-		probe := &kernelBenchmarkVisionProbe{}
+		// Observe only genuine Vision transitions. Direct TLS uses the same
+		// application records without pretending to negotiate Vision padding.
+		probe = &kernelBenchmarkVisionProbe{}
 		clog.RegisterHandler(probe)
 		b.Cleanup(func() { clog.RegisterHandler(quiet) })
+	}
+	var conn net.Conn = raw
+	if applicationTLS != nil {
 		secure := tls.Client(raw, applicationTLS.Clone())
 		if err := secure.Handshake(); err != nil {
 			b.Fatal(err)
@@ -238,9 +245,11 @@ func benchmarkKernelEchoMode(b *testing.B, mode, workload string, mtu int, confi
 			b.Fatal("benchmark application did not establish verified TLS1.3")
 		}
 		conn = secure
+	}
+	if probe != nil {
 		benchmarkVisionSmallRecords(b, conn, probe)
 		clog.RegisterHandler(quiet)
-	} else if workload != "duplex" {
+	} else if applicationTLS != nil || workload != "duplex" {
 		benchmarkSmallRecords(b, conn)
 	}
 	transfer, verify, bytesPerOp := benchmarkKernelTraffic(b, raw, conn, workload)

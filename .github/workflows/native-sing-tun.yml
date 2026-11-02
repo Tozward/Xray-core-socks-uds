@@ -13,7 +13,7 @@ on:
       profile_transport:
         description: Profile transport
         type: choice
-        options: [all, freedom, vision_tls13]
+        options: [all, freedom, freedom_tls13, vision_tls13]
         default: all
       profile_workload:
         description: Bulk direction (duplex is aggregate echo)
@@ -165,6 +165,7 @@ jobs:
         run: |
           {
             echo 'Baseline: uninstrumented, 3 x 2s per selected case, actual TUN MTU9000.'
+            echo 'freedom uses plaintext TCP; freedom_tls13 and vision_tls13 use the same verified application TLS1.3 fixture.'
             echo 'Duplex counts 8MiB/op; upload/download count 4MiB/op plus uncounted one-byte controls.'
             echo 'CPU totals include this Go process (application/Xray/local Vision node) and the HEV child.'
             echo 'Go CPU/block/trace profiles exclude HEV child execution and C allocations.'
@@ -189,18 +190,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          case "$PROFILE_TRANSPORT" in all|freedom|vision_tls13) ;; *) exit 2 ;; esac
+          case "$PROFILE_TRANSPORT" in all|freedom|freedom_tls13|vision_tls13) ;; *) exit 2 ;; esac
           case "$PROFILE_WORKLOAD" in all|duplex|upload|download) ;; *) exit 2 ;; esac
           case "$PROFILE_PATH" in all|hev_android_defaults|socks_full_splice|socks_full_splice_jumbo|native_read_write|native_download_splice|native_vector_write|native_bidirectional_splice|native_bidirectional_jumbo|sing_direct_engine) ;; *) exit 2 ;; esac
           case "$PROFILER" in cpu|block|trace) profilers=("$PROFILER") ;; all) profilers=(cpu block trace) ;; *) exit 2 ;; esac
-          if [[ "$PROFILE_TRANSPORT" == vision_tls13 && "$PROFILE_PATH" == sing_direct_engine ]]; then
+          if [[ "$PROFILE_PATH" == sing_direct_engine && "$PROFILE_TRANSPORT" != all && "$PROFILE_TRANSPORT" != freedom ]]; then
             echo 'The direct engine control bypasses Xray and supports freedom only.'
             exit 2
           fi
           ticks=$(getconf CLK_TCK)
           # Complete every uninstrumented run before enabling any profiler.
           for phase in baseline diagnostic; do
-          for transport in freedom vision_tls13; do
+          for transport in freedom freedom_tls13 vision_tls13; do
             [[ "$PROFILE_TRANSPORT" == all || "$PROFILE_TRANSPORT" == "$transport" ]] || continue
             modes=(hev_android_defaults socks_full_splice socks_full_splice_jumbo native_read_write native_download_splice native_vector_write native_bidirectional_splice native_bidirectional_jumbo)
             [[ "$transport" != freedom ]] || modes+=(sing_direct_engine)
