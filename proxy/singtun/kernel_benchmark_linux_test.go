@@ -37,7 +37,7 @@ import (
 )
 
 // BenchmarkKernelNativeEchoDuplex measures steady-state, single-connection
-// IPv4 application echo over an actual MTU-1500 Linux TUN. SetBytes counts upload
+// IPv4 application echo over an actual Linux TUN at each named MTU. SetBytes counts upload
 // plus echoed download; the MB/s number is aggregate duplex throughput, not a
 // one-direction download rate. Setup, handshakes, warmup and teardown are excluded.
 // Allocations and getrusage(RUSAGE_SELF) include all participating Go threads,
@@ -58,16 +58,20 @@ func BenchmarkKernelNativeEchoDuplex(b *testing.B) {
 			} else {
 				port = echoTCP(b)
 			}
-			for _, mode := range []string{"hev_android_defaults", "hev_no_jumbo", "socks_full_splice", "native_read_write", "native_download_splice"} {
-				b.Run(mode, func(b *testing.B) {
-					benchmarkKernelEchoMode(b, mode, proto.Clone(config).(*core.Config), port, applicationTLS)
+			for _, mtu := range []int{1500, 9000} {
+				b.Run(fmt.Sprintf("mtu_%d", mtu), func(b *testing.B) {
+					for _, mode := range []string{"hev_android_defaults", "hev_no_jumbo", "socks_full_splice", "native_read_write", "native_download_splice"} {
+						b.Run(mode, func(b *testing.B) {
+							benchmarkKernelEchoMode(b, mode, mtu, proto.Clone(config).(*core.Config), port, applicationTLS)
+						})
+					}
 				})
 			}
 		})
 	}
 }
 
-func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, port int, applicationTLS *tls.Config) {
+func benchmarkKernelEchoMode(b *testing.B, mode string, mtu int, config *core.Config, port int, applicationTLS *tls.Config) {
 	b.Helper()
 	b.StopTimer()
 	// Xray's log handler is shared by cores in this process. The client logger
@@ -76,7 +80,7 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 	config.App = append([]*serial.TypedMessage{serial.ToTypedMessage(&applog.Config{
 		ErrorLogType: applog.LogType_None, AccessLogType: applog.LogType_None, ErrorLogLevel: clog.Severity_Error,
 	})}, config.App...)
-	fd, name, ip4, ip6 := kernelDevice(b)
+	fd, name, ip4, ip6 := kernelDeviceMTU(b, mtu)
 	var hev *kernelHEVProcess
 	var socksForwarder *kernelBenchmarkSOCKS
 	var ordinaryForwarder *kernelBenchmarkOrdinary
@@ -102,7 +106,7 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 			b.Fatal(err)
 		}
 		if mode != "socks_full_splice" {
-			hev = benchmarkStartHEV(b, fd, ip4, ip6, socksPort, mode == "hev_no_jumbo")
+			hev = benchmarkStartHEV(b, fd, ip4, ip6, mtu, socksPort, mode == "hev_no_jumbo")
 			break
 		}
 		socksForwarder = &kernelBenchmarkSOCKS{
@@ -110,18 +114,37 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 			client: singsocks.NewClient(&kernelBenchmarkLoopbackDialer{dialer: net.Dialer{Timeout: 5 * time.Second}},
 				M.Socksaddr{Addr: netip.MustParseAddr("127.0.0.1"), Port: uint16(socksPort)}, singsocks.Version5, "", ""),
 		}
-		benchmarkKernelStack(b, name, ip4, ip6, context.Background(), socksForwarder, socksForwarder.flowHandler)
+		benchmarkKernelStack(b, name, ip4, ip6, mtu, context.Background(), socksForwarder, socksForwarder.flowHandler)
 	case "native_read_write":
 		created, handler := memoryCore(b, config, session.SniffingRequest{})
 		instance = created
-		ordinaryForwarder = &kernelBenchmarkOrdinary{flowHandler: &flowHandler{native: handler.native, mtu: 1500}}
-		benchmarkKernelStack(b, name, ip4, ip6, handler.ctx, ordinaryForwarder, ordinaryForwarder.flowHandler)
+		ordinaryForwarder = &kernelBenchmarkOrdinary{flowHandler: &flowHandler{native: handler.native, mtu: mtu}}
+		benchmarkKernelStack(b, name, ip4, ip6, mtu, handler.ctx, ordinaryForwarder, ordinaryForwarder.flowHandler)
 	case "native_download_splice":
-		instance = kernelCore(b, config, name, ip4, ip6)
+		instance = kernelCoreMTU(b, config, name, ip4, ip6, mtu)
 	default:
 		b.Fatalf("unknown benchmark mode %q", mode)
 	}
 	raw := kernelDial(b, ip4, port)
+	// Verify the host route and negotiated local MSS actually changed. Merely
+	// changing stack metadata would leave this a mismatched-MTU comparison.
+	var pathMTU, mss int
+	var queryErr error
+	control, err := raw.SyscallConn()
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err = control.Control(func(fd uintptr) {
+		pathMTU, queryErr = unix.GetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MTU)
+		if queryErr == nil {
+			mss, queryErr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG)
+		}
+	}); err != nil {
+		b.Fatal(err)
+	}
+	if queryErr != nil || pathMTU != mtu || mss < mtu-60 || mss > mtu-40 {
+		b.Fatalf("MTU/MSS mismatch: requested=%d path=%d mss=%d error=%v", mtu, pathMTU, mss, queryErr)
+	}
 	var conn net.Conn = raw
 	if applicationTLS != nil {
 		quiet, ok := instance.GetFeature((*applog.Instance)(nil)).(*applog.Instance)
@@ -209,6 +232,8 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 	b.ReportAllocs()
 	b.SetBytes(int64(2 * len(payload)))
 	b.ResetTimer()
+	b.ReportMetric(float64(pathMTU), "path-MTU")
+	b.ReportMetric(float64(mss), "local-MSS")
 	if err := unix.Getrusage(unix.RUSAGE_SELF, &before); err != nil {
 		b.Fatal(err)
 	}
@@ -304,10 +329,10 @@ func benchmarkTimevalSeconds(value unix.Timeval) float64 {
 	return float64(value.Sec) + float64(value.Usec)/1e6
 }
 
-func benchmarkKernelStack(b *testing.B, name string, ip4, ip6 netip.Addr, parent context.Context, handler stun.Handler, gate *flowHandler) {
+func benchmarkKernelStack(b *testing.B, name string, ip4, ip6 netip.Addr, mtu int, parent context.Context, handler stun.Handler, gate *flowHandler) {
 	b.Helper()
 	options := stun.Options{
-		Name: name, MTU: 1500, DNSMode: stun.DNSModeDisabled, EXP_ExternalConfiguration: true, Logger: logger.NOP(),
+		Name: name, MTU: uint32(mtu), DNSMode: stun.DNSModeDisabled, EXP_ExternalConfiguration: true, Logger: logger.NOP(),
 		Inet4Address: []netip.Prefix{netip.PrefixFrom(ip4, 30)}, Inet6Address: []netip.Prefix{netip.PrefixFrom(ip6, 126)},
 	}
 	device, err := openDevice(&options)

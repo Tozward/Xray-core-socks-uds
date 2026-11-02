@@ -32,6 +32,11 @@ var kernelTestSequence atomic.Uint32
 // machine, with XRAY_REQUIRE_NATIVE_TUN_TESTS=1 to forbid privileged-test skips.
 func kernelDevice(t testing.TB) (int, string, netip.Addr, netip.Addr) {
 	t.Helper()
+	return kernelDeviceMTU(t, 1500)
+}
+
+func kernelDeviceMTU(t testing.TB, mtu int) (int, string, netip.Addr, netip.Addr) {
+	t.Helper()
 	if os.Geteuid() != 0 {
 		if os.Getenv("XRAY_REQUIRE_NATIVE_TUN_TESTS") == "1" {
 			t.Fatal("native TUN tests require CAP_NET_ADMIN")
@@ -71,7 +76,7 @@ func kernelDevice(t testing.TB) (int, string, netip.Addr, netip.Addr) {
 			t.Fatal(err)
 		}
 	}
-	if err = netlink.LinkSetMTU(link, 1500); err != nil {
+	if err = netlink.LinkSetMTU(link, mtu); err != nil {
 		t.Fatal(err)
 	}
 	if err = netlink.LinkSetUp(link); err != nil {
@@ -83,11 +88,16 @@ func kernelDevice(t testing.TB) (int, string, netip.Addr, netip.Addr) {
 
 func kernelCore(t testing.TB, config *core.Config, name string, ip4, ip6 netip.Addr) *core.Instance {
 	t.Helper()
+	return kernelCoreMTU(t, config, name, ip4, ip6, 1500)
+}
+
+func kernelCoreMTU(t testing.TB, config *core.Config, name string, ip4, ip6 netip.Addr, mtu int) *core.Instance {
+	t.Helper()
 	config.Inbound = []*core.InboundHandlerConfig{{
 		Tag:              integrationTag,
 		ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{}),
 		ProxySettings: serial.ToTypedMessage(&Config{
-			Name: name, Mtu: 1500,
+			Name: name, Mtu: uint32(mtu),
 			Address: []string{netip.PrefixFrom(ip4, 30).String(), netip.PrefixFrom(ip6, 126).String()}, UserLevel: 7,
 		}),
 	}}

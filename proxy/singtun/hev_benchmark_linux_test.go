@@ -24,7 +24,7 @@ type kernelHEVProcess struct {
 // The runner links the exact HEV library used by the APK and borrows child fd3,
 // matching Android JNI's supplied no-virtio-header TUN descriptor. It does not
 // create another interface or change the host's routing/DNS.
-func benchmarkStartHEV(b *testing.B, fd int, ip4, ip6 netip.Addr, socksPort int, noJumbo bool) *kernelHEVProcess {
+func benchmarkStartHEV(b *testing.B, fd int, ip4, ip6 netip.Addr, mtu, socksPort int, noJumbo bool) *kernelHEVProcess {
 	b.Helper()
 	binary := os.Getenv("XRAY_HEV_BENCHMARK_BINARY")
 	if binary == "" {
@@ -41,7 +41,7 @@ func benchmarkStartHEV(b *testing.B, fd int, ip4, ip6 netip.Addr, socksPort int,
 	}
 	// Keep Android defaults, including its 64KiB TCP buffer. The second HEV
 	// case explicitly disables jumbo; no-header Android defaults retain jumbo.
-	config := fmt.Sprintf("tunnel:\n  mtu: 1500\n  ipv4: %s\n  ipv6: '%s'\n%ssocks5:\n  address: 127.0.0.1\n  port: %d\n  udp: udp\nmisc:\n  tcp-read-write-timeout: 300000\n  udp-read-write-timeout: 60000\n  log-level: error\n", ip4, ip6, offload, socksPort)
+	config := fmt.Sprintf("tunnel:\n  mtu: %d\n  ipv4: %s\n  ipv6: '%s'\n%ssocks5:\n  address: 127.0.0.1\n  port: %d\n  udp: udp\nmisc:\n  tcp-read-write-timeout: 300000\n  udp-read-write-timeout: 60000\n  log-level: error\n", mtu, ip4, ip6, offload, socksPort)
 	configPath := filepath.Join(directory, "hev.yml")
 	if err = os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		b.Fatal(err)

@@ -76,8 +76,13 @@ jobs:
           if '--- FAIL:' in result or 'WARNING: DATA RACE' in result:
               raise SystemExit('Benchmark includes a failed subcase')
           rows = [line for line in result.splitlines() if ' ns/op' in line and ' allocs/op' in line]
-          if len(rows) != 30:
-              raise SystemExit(f'Expected 30 measured results, found {len(rows)}')
+          if len(rows) != 60:
+              raise SystemExit(f'Expected 60 measured results, found {len(rows)}')
+          for row in rows:
+              mtu = 9000 if '/mtu_9000/' in row else 1500
+              fields = row.split()
+              if int(fields[fields.index('path-MTU') - 1]) != mtu:
+                  raise SystemExit(f'Incorrect actual MTU: {row}')
           PY
       - name: Preserve benchmark evidence
         if: runner.os == 'Linux' && always()
