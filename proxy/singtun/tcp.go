@@ -57,7 +57,7 @@ func (c *tcpConn) spliceDirection(ctx context.Context, source net.Conn, progress
 	case *net.TCPConn:
 		peer = source
 	case *net.UnixConn:
-		if source.RemoteAddr().Network() == "unix" {
+		if address := source.RemoteAddr(); address != nil && address.Network() == "unix" {
 			peer = source
 		}
 	}
