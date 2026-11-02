@@ -41,7 +41,9 @@ import (
 // plus echoed download; the MB/s number is aggregate duplex throughput, not a
 // one-direction download rate. Setup, handshakes, warmup and teardown are excluded.
 // Allocations and getrusage(RUSAGE_SELF) include all participating Go threads,
-// Xray cores, loopback application server and the local Vision node. They do not
+// Xray cores, loopback application server and the local Vision node. HEV CPU
+// additionally includes its child process; Go allocation counts exclude HEV's C
+// heap and are not a total-memory comparison. These metrics do not
 // represent whole-host CPU, Android power use or an external-network benchmark.
 func BenchmarkKernelNativeEchoDuplex(b *testing.B) {
 	for _, profile := range []string{"freedom", "vision_tls13"} {
@@ -56,7 +58,7 @@ func BenchmarkKernelNativeEchoDuplex(b *testing.B) {
 			} else {
 				port = echoTCP(b)
 			}
-			for _, mode := range []string{"socks_full_splice", "native_read_write", "native_download_splice"} {
+			for _, mode := range []string{"hev_android_defaults", "hev_no_jumbo", "socks_full_splice", "native_read_write", "native_download_splice"} {
 				b.Run(mode, func(b *testing.B) {
 					benchmarkKernelEchoMode(b, mode, proto.Clone(config).(*core.Config), port, applicationTLS)
 				})
@@ -74,12 +76,13 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 	config.App = append([]*serial.TypedMessage{serial.ToTypedMessage(&applog.Config{
 		ErrorLogType: applog.LogType_None, AccessLogType: applog.LogType_None, ErrorLogLevel: clog.Severity_Error,
 	})}, config.App...)
-	_, name, ip4, ip6 := kernelDevice(b)
+	fd, name, ip4, ip6 := kernelDevice(b)
+	var hev *kernelHEVProcess
 	var socksForwarder *kernelBenchmarkSOCKS
 	var ordinaryForwarder *kernelBenchmarkOrdinary
 	var instance *core.Instance
 	switch mode {
-	case "socks_full_splice":
+	case "socks_full_splice", "hev_android_defaults", "hev_no_jumbo":
 		socksPort := visionLoopbackPort(b)
 		config.Inbound = []*core.InboundHandlerConfig{{
 			Tag: integrationTag,
@@ -97,6 +100,10 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 		b.Cleanup(func() { _ = instance.Close() })
 		if err = instance.Start(); err != nil {
 			b.Fatal(err)
+		}
+		if mode != "socks_full_splice" {
+			hev = benchmarkStartHEV(b, fd, ip4, ip6, socksPort, mode == "hev_no_jumbo")
+			break
 		}
 		socksForwarder = &kernelBenchmarkSOCKS{
 			flowHandler: &flowHandler{},
@@ -195,6 +202,10 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 		assertNativeHandoff(b)
 	}
 	var before, after unix.Rusage
+	var childUserBefore, childSystemBefore float64
+	if hev != nil {
+		childUserBefore, childSystemBefore = hev.cpuTime(b)
+	}
 	b.ReportAllocs()
 	b.SetBytes(int64(2 * len(payload)))
 	b.ResetTimer()
@@ -216,6 +227,12 @@ func benchmarkKernelEchoMode(b *testing.B, mode string, config *core.Config, por
 	}
 	user := benchmarkTimevalSeconds(after.Utime) - benchmarkTimevalSeconds(before.Utime)
 	system := benchmarkTimevalSeconds(after.Stime) - benchmarkTimevalSeconds(before.Stime)
+	if hev != nil {
+		childUser, childSystem := hev.cpuTime(b)
+		user += childUser - childUserBefore
+		system += childSystem - childSystemBefore
+		b.ReportMetric((childUser-childUserBefore+childSystem-childSystemBefore)*1000/float64(b.N), "hev-cpu-ms/op")
+	}
 	b.ReportMetric(user*1000/float64(b.N), "user-ms/op")
 	b.ReportMetric(system*1000/float64(b.N), "sys-ms/op")
 	b.ReportMetric((user+system)*1000/float64(b.N), "cpu-ms/op")
