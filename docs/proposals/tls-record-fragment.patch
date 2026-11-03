@@ -1,0 +1,154 @@
+--- a/common/protocol/tls/sniff.go
++++ b/common/protocol/tls/sniff.go
+@@ -145,6 +145,11 @@
+ 	}
+ 	headerLen := int(binary.BigEndian.Uint16(b[3:5]))
+ 	if 5+headerLen > len(b) {
++		// RFC 8446 section 5.1 bounds plaintext records to 2^14 bytes.
++		// Larger declarations retain the existing early-exit classification.
++		if headerLen <= 1<<14 {
++			return nil, protocol.ErrProtoNeedMoreData
++		}
+ 		return nil, common.ErrNoClue
+ 	}
+ 
+--- /dev/null
++++ b/common/protocol/tls/sniff_fragment_test.go
+@@ -0,0 +1,40 @@
++package tls_test
++
++import (
++	"encoding/hex"
++	"errors"
++	"github.com/xtls/xray-core/common/protocol"
++	xtls "github.com/xtls/xray-core/common/protocol/tls"
++	"testing"
++)
++
++func TestFragmentedTLSNeedsMoreData(t *testing.T) {
++	wire, err := hex.DecodeString("16030100c8010000c403031aacb2a8feb496045bcaf7c1f42e53246e340c5836719759e94166e243a013b60000201a1ac02bc02fc02cc030cca9cca8cc14cc13c013c014009c009d002f0035000a0100007bbaba0000ff01000100000000160014000011632e732d6d6963726f736f66742e636f6d0017000000230000000d00140012040308040401050308050501080606010201000500050100000000001200000010000e000c02683208687474702f312e31000b00020100000a000a0008aaaa001d00170018aaaa000100")
++	if err != nil {
++		t.Fatal(err)
++	}
++	for cut := 5; cut < len(wire); cut++ {
++		_, err := xtls.SniffTLS(wire[:cut])
++		if !errors.Is(err, protocol.ErrProtoNeedMoreData) {
++			t.Fatalf("incomplete TLS at %d/%d classified as %v", cut, len(wire), err)
++		}
++	}
++	h, err := xtls.SniffTLS(wire)
++	if err != nil || h.Domain() != "c.s-microsoft.com" {
++		t.Fatalf("complete TLS: %v %v", h, err)
++	}
++	for _, invalid := range [][]byte{{0x17, 3, 1, 0, 200}, {0x16, 1, 1, 0, 200}} {
++		_, err := xtls.SniffTLS(invalid)
++		if err == nil || errors.Is(err, protocol.ErrProtoNeedMoreData) {
++			t.Fatal("invalid record treated as incomplete TLS", err)
++		}
++	}
++	for _, declared := range []int{16385, 32767, 65535} {
++		header := []byte{0x16, 3, 1, byte(declared >> 8), byte(declared)}
++		_, err := xtls.SniffTLS(header)
++		if errors.Is(err, protocol.ErrProtoNeedMoreData) {
++			t.Fatalf("oversized declaration %d requests more input", declared)
++		}
++	}
++
++}
+--- /dev/null
++++ b/app/dispatcher/sniff_budget_test.go
+@@ -0,0 +1,94 @@
++package dispatcher
++
++import (
++	"context"
++	"errors"
++	"io"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/buf"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/core"
++)
++
++type studyTLSReader struct {
++	ctx      context.Context
++	declared int
++	mode     string
++	calls    int
++}
++
++func (r *studyTLSReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
++	return r.ReadMultiBufferTimeout(time.Second)
++}
++func (r *studyTLSReader) ReadMultiBufferTimeout(budget time.Duration) (buf.MultiBuffer, error) {
++	r.calls++
++	if r.calls == 1 {
++		return buf.MultiBuffer{buf.FromBytes([]byte{0x16, 3, 1, byte(r.declared >> 8), byte(r.declared)})}, nil
++	}
++	switch r.mode {
++	case "eof":
++		return nil, io.EOF
++	case "stall", "cancel":
++		timer := time.NewTimer(budget)
++		defer timer.Stop()
++		select {
++		case <-r.ctx.Done():
++			return nil, r.ctx.Err()
++		case <-timer.C:
++			return nil, buf.ErrReadTimeout
++		}
++	}
++	if r.calls > 32 {
++		return nil, io.EOF
++	}
++	b := buf.New()
++	clear(b.Extend(buf.Size))
++	return buf.MultiBuffer{b}, nil
++}
++func TestTLSProposalBudgetAndMalformedInput(t *testing.T) {
++	for _, tc := range []struct {
++		name     string
++		declared int
++		mode     string
++		maxCalls int
++		maxBytes int32
++	}{
++		{"oversized_65535", 65535, "burst", 2, buf.Size + 5},
++		{"oversized_32767", 32767, "burst", 2, buf.Size + 5},
++		{"oversized_16385", 16385, "burst", 2, buf.Size + 5},
++		{"legal_max_malformed_body", 16384, "burst", 3, 2*buf.Size + 5},
++		{"incomplete_eof", 16384, "eof", 2, 5},
++		{"incomplete_stall", 16384, "stall", 2, 5},
++		{"incomplete_cancel", 16384, "cancel", 2, 5},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), core.XrayKey(1), new(core.Instance)))
++			defer cancel()
++			if tc.mode == "cancel" {
++				stop := time.AfterFunc(20*time.Millisecond, cancel)
++				defer stop.Stop()
++			}
++			source := &studyTLSReader{ctx: ctx, declared: tc.declared, mode: tc.mode}
++			reader := &cachedReader{reader: source}
++			defer reader.Interrupt()
++			started := time.Now()
++			_, err := sniffer(ctx, reader, false, xnet.Network_TCP)
++			elapsed := time.Since(started)
++			if err == nil {
++				t.Fatal("malformed/incomplete TLS unexpectedly recognized")
++			}
++			if source.calls > tc.maxCalls || reader.cache.Len() > tc.maxBytes {
++				t.Fatalf("unbounded input: calls=%d bytes=%d", source.calls, reader.cache.Len())
++			}
++			if elapsed > time.Second {
++				t.Fatalf("read budget failed to terminate: %s", elapsed)
++			}
++			if tc.mode == "cancel" && !errors.Is(err, context.Canceled) {
++				t.Fatalf("cancellation lost: %v", err)
++			}
++			t.Logf("calls=%d retained_bytes=%d elapsed=%s", source.calls, reader.cache.Len(), elapsed)
++		})
++	}
++}
