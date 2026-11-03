@@ -1,5 +1,8 @@
 # Preconnection behavior and TUN integration, 2026-11-03
 
+The study sections below preserve the original research snapshot. The approved
+integration and its active patch record are appended at the end.
+
 ## Scope and release boundary
 
 This is a synthetic, phone-local behavioral investigation of application
@@ -175,3 +178,16 @@ baseline TLS/REALITY matrices, failed adapter drafts, bounded/unbounded
 proposal logs, safety controls, scripts and overlay sources. These artifacts
 contain no personal node credentials or browser content. The diagnostic code
 and documentation add no code, timer, logger or allocation to the APK.
+
+## Approved integration
+
+The user subsequently authorized the bounded TLS compatibility correction.
+It is now applied to SniffTLS, with protocol and dispatcher regressions in the
+ordinary/native CI suites. The strict real-TUN domain-routing regression is
+mandatory rather than opt-in; the larger timing matrix remains opt-in.
+
+`upstream-compatibility-patches.md`, XR-COMPAT-001, records the exact scope,
+resource bounds, remaining limitations and upstream-first retirement condition.
+The Sing dependency and all discarded adapter/buffer prototypes remain unchanged.
+The proposal patch is retained only as historical review material; executable
+source and tests are authoritative after this integration.

@@ -145,6 +145,11 @@ func SniffTLS(b []byte) (*SniffHeader, error) {
 	}
 	headerLen := int(binary.BigEndian.Uint16(b[3:5]))
 	if 5+headerLen > len(b) {
+		// RFC 8446 section 5.1 bounds plaintext records to 2^14 bytes.
+		// Larger declarations retain the existing early-exit classification.
+		if headerLen <= 1<<14 {
+			return nil, protocol.ErrProtoNeedMoreData
+		}
 		return nil, common.ErrNoClue
 	}
 

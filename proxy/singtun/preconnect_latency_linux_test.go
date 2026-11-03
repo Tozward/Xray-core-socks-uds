@@ -74,9 +74,6 @@ func TestNativeKernelPreconnectLatencyStudy(t *testing.T) {
 // The fallback deliberately rejects traffic: an application response requires
 // the sniffed TLS domain to select the real Vision outbound, not just byte IO.
 func TestNativeKernelLargeClientHelloDomainRoute(t *testing.T) {
-	if os.Getenv("XRAY_NATIVE_PRECONNECT_STUDY") != "1" {
-		t.Skip("opt-in diagnostic for fragmented TLS sniffing")
-	}
 	for _, path := range []string{"official_stack", "native_bidirectional_jumbo"} {
 		t.Run(path, func(t *testing.T) {
 			preconnectLatencyCase(t, path, "large_fragmented", "tls13", 0, 0, true)

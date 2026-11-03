@@ -580,3 +580,10 @@ Kotlin/assembly/lint checks, and Android API24/API35 VPN backend TCP/UDP checks
 at MTU1280/1500/9000. The arm64 Playstore APK is 32934142 bytes (612 bytes larger
 than .3), SHA256 `029fc296c05ed591e0e84ac3b7edfc5ba4b8c205d88cd18d55ac4d1864afd5c8`.
 No physical phone was operated, and no phone energy measurement was performed.
+
+## Shared protocol compatibility corrections
+
+The separately approved TLS-record fragmentation correction is tracked as
+XR-COMPAT-001 in [the compatibility ledger](upstream-compatibility-patches.md).
+Keep it separate from TUN APIs and dependency performance parameters, and prefer
+an equivalent upstream fix after its regressions pass.

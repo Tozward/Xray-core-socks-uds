@@ -55,11 +55,11 @@ jobs:
             exit 1
           fi
           go build -o default-xray${{ runner.os == 'Windows' && '.exe' || '' }} ./main
-          go test ./proxy ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf
+          go test ./proxy ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf ./common/protocol/tls
       - name: Native tests and race checks
         shell: bash
         run: |
-          go test -race -tags with_sing_tun ./proxy ./proxy/singtun ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf -timeout=5m
+          go test -race -tags with_sing_tun ./proxy ./proxy/singtun ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf ./common/protocol/tls -timeout=5m
           go vet -tags with_sing_tun ./proxy/singtun ./proxy
       - name: Retired custom protocol stays outside both binaries
         shell: bash
