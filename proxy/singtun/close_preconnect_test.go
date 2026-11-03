@@ -272,6 +272,7 @@ func (h *closePreconnectOutbound) Dispatch(ctx context.Context, link *transport.
 	h.entered <- closePreconnectDispatch{ctx: ctx, link: link}
 	h.returned <- h.processor.Process(ctx, link, h.dialer)
 }
+
 func (h *closePreconnectOutbound) Close() error {
 	h.once.Do(func() { close(h.closed); _ = h.processor.Close() })
 	return nil

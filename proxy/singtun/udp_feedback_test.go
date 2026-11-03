@@ -209,10 +209,14 @@ func TestPacketHandshakeIgnoresShutdownAndPreservesTracker(t *testing.T) {
 		cancelled bool
 		feedback  bool
 	}{
-		{"eof", io.EOF, false, false}, {"pipe", io.ErrClosedPipe, false, false},
-		{"net_closed", net.ErrClosed, false, false}, {"os_closed", os.ErrClosed, false, false},
-		{"cancel", context.Canceled, false, false}, {"live_outbound_deadline", context.DeadlineExceeded, false, true},
-		{"live_os_deadline", os.ErrDeadlineExceeded, false, true}, {"cancelled_context", errors.New("late failure"), true, false},
+		{"eof", io.EOF, false, false},
+		{"pipe", io.ErrClosedPipe, false, false},
+		{"net_closed", net.ErrClosed, false, false},
+		{"os_closed", os.ErrClosed, false, false},
+		{"cancel", context.Canceled, false, false},
+		{"live_outbound_deadline", context.DeadlineExceeded, false, true},
+		{"live_os_deadline", os.ErrDeadlineExceeded, false, true},
+		{"cancelled_context", errors.New("late failure"), true, false},
 		{"deadline_after_cancel", context.DeadlineExceeded, true, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -367,6 +371,7 @@ type udpFeedbackBatchConn struct {
 }
 
 func (c *udpFeedbackBatchConn) CreatePacketBatchWriter() (N.PacketBatchWriter, bool) { return c, true }
+
 func (c *udpFeedbackBatchConn) WritePacketBatch(packets []*sbuf.Buffer, _ []M.Socksaddr) error {
 	defer sbuf.ReleaseMulti(packets)
 	c.batches = append(c.batches, len(packets))
@@ -604,6 +609,7 @@ func (c *udpFeedbackObservedConn) Upstream() any { return c.PacketConn }
 func (c *udpFeedbackObservedConn) CreatePacketBatchWriter() (N.PacketBatchWriter, bool) {
 	return bufio.CreatePacketBatchWriter(c.PacketConn)
 }
+
 func (c *udpFeedbackObservedConn) HandshakeSuccess() error {
 	err := c.success.HandshakeSuccess()
 	select {
