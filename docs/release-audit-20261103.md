@@ -1,5 +1,14 @@
 # Native TUN release audit, 2026-11-03
 
+> Scope correction: the v1 release mistakenly retained and repaired this fork's
+> abandoned custom SOCKS-over-UDS extension. That work was outside the native TUN
+> request. The native branch now removes its implementation, JSON/protobuf
+> registration and CI targets. Native forwarding has never depended on it;
+> the historical v1 findings and measurements below are retained as records,
+> not as a requirement to maintain that extension. Official Xray Unix socket
+> transports remain unchanged. Already published v1/APK artifacts are immutable
+> and still contain the old, unrelated protocol registration.
+
 ## Scope and architecture
 
 The reviewed Xray changes are relative to `7c8dbcb4bbec7f80d16070069e0b2f7bf3aca62c`;
@@ -157,3 +166,11 @@ Android AAR import graphs; preserve the raw warning and this interpretation.
 A direct Android source symbol scan was not run locally because its NDK/cgo
 asset setup is unavailable. Known-vulnerability scanning does not replace the
 manual review of this fork's code.
+
+## Native-only scope correction
+
+The requested feature is native sing-tun/NewGo integration with Xray, without a local SOCKS or UDS relay. Retaining and repairing the abandoned `socks_uds` protocol was an erroneous scope expansion, not a dependency of the native data path. The branch removes `proxy/socks_uds`, its conf adapter/registration and its CI package targets. No native forwarding, Vision readiness, buffer ownership, batch size, routing or official Unix transport code is changed. The old fork's `main` and published tags are not rewritten.
+
+Both ordinary and tagged native configuration tests reject the retired protocol, including mixed-case names, and confirm its protobuf type is not registered. The official SOCKS Unix-listen configuration still builds. Ordinary tests and the six-package tagged race suite pass locally; both CLI builds pass, and their full `main` dependency graphs contain no `proxy/socks_uds` package. The ordinary build still excludes SagerNet dependencies. CI retains those graph assertions alongside the existing native regressions. This guard records local scope and should be reevaluated if official Xray later introduces an equivalent protocol.
+
+Earlier numerical measurements remain historical results for their recorded binaries. They used direct native handoff and never forwarded through the retired protocol; removing that unrelated implementation is not a measured TUN performance improvement. A release that still pins `e965fbf7` continues to contain the old registration even though its native traffic does not use it. Downstream consumers must adopt this cleanup commit to remove it from their binaries.

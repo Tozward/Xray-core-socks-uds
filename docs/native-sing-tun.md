@@ -1,5 +1,16 @@
 # Optional native sing-tun inbound
 
+The branch implements native sing-tun integration only. Its data path is
+`host TUN fd -> sing-tun NewGo -> Xray dispatcher -> Xray outbound`. Protocol-ready
+socket handoff preserves Vision framing and the original splice conditions.
+It does not use a local SOCKS server or SOCKS-over-UDS bridge.
+
+The abandoned custom `socks_uds` implementation and its registration have been
+removed from this branch. Official Xray Unix socket transports and native
+handoff support for a connected Unix stream remain separate, supported paths.
+The remote repository name and historical result URLs retain their existing
+identity; they do not describe the native forwarding architecture.
+
 The `sing-tun` inbound connects SagerNet's `NewGo` IP stack directly to Xray's
 dispatcher. It is enabled only by the `with_sing_tun` build tag. It does not start
 a SOCKS listener, embed sing-box, or insert forwarding pipes between the stacks.
@@ -7,9 +18,9 @@ The existing `tun` inbound and TCP kernel-splice path remain available.
 
 The root module pins the independently maintained
 [dependency fork](https://github.com/Tozward/sing-tun/tree/feature/xray-native-tun)
-at `9af120bbf52457f6c946e4d63587c2bfed57e07e`. No local checkout is needed to
+at `2c2f8b289bf652b432506e0a6fe50e6ac6bd1fa2`. No local checkout is needed to
 build it. The original upstream revision alone does not provide the directional APIs.
-The [patch ledger](https://github.com/Tozward/sing-tun/blob/9af120bbf52457f6c946e4d63587c2bfed57e07e/docs/xray-integration-patches.md)
+The [patch ledger](https://github.com/Tozward/sing-tun/blob/2c2f8b289bf652b432506e0a6fe50e6ac6bd1fa2/docs/xray-integration-patches.md)
 keeps constructor fixes, directional handoff, borrowed vectors and local aggregation
 separate, with upstream-first retirement criteria.
 
@@ -18,10 +29,10 @@ separate, with upstream-first retirement criteria.
 | Component | Examined reference |
 | --- | --- |
 | Xray upstream | `7c8dbcb4bbec7f80d16070069e0b2f7bf3aca62c` |
-| Existing SOCKS UDS extension merged onto that baseline | `189fba66acd8da2fa9c2b8df14f798a9a02c1b50` |
+| Historical fork starting point; SOCKS UDS extension now retired | `189fba66acd8da2fa9c2b8df14f798a9a02c1b50` |
 | `github.com/sagernet/sing-tun` | `v0.9.7-0.20261023115453-611d83b7a57b`, commit `611d83b7a57b4719be45581eb674942ff561de6c` |
 | `github.com/sagernet/sing` | `v0.9.7-0.20261023115510-03a6cce64bf7`, commit `03a6cce64bf744023af9e2691fb11afd405b9061` |
-| Local sing-tun dependency | `github.com/Tozward/sing-tun v0.9.7-0.20261102183854-9af120bbf524` |
+| Local sing-tun dependency | `github.com/Tozward/sing-tun v0.9.7-0.20261102194020-2c2f8b289bf6` |
 
 The SagerNet pins were selected from sing-box `v1.15.0-alpha.13`; sing-box is
 provenance, not a runtime dependency. Reviewed alternatives included the existing

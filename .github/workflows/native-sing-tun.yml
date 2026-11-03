@@ -55,12 +55,21 @@ jobs:
             exit 1
           fi
           go build -o default-xray${{ runner.os == 'Windows' && '.exe' || '' }} ./main
-          go test ./proxy ./proxy/socks_uds ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf
+          go test ./proxy ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf
       - name: Native tests and race checks
         shell: bash
         run: |
-          go test -race -tags with_sing_tun ./proxy ./proxy/singtun ./proxy/socks_uds ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf -timeout=5m
-          go vet -tags with_sing_tun ./proxy/singtun ./proxy/socks_uds ./proxy
+          go test -race -tags with_sing_tun ./proxy ./proxy/singtun ./proxy/tun ./infra/conf ./app/dispatcher ./common/buf -timeout=5m
+          go vet -tags with_sing_tun ./proxy/singtun ./proxy
+      - name: Retired custom protocol stays outside both binaries
+        shell: bash
+        run: |
+          go list -deps ./main > "$RUNNER_TEMP/default-deps.txt"
+          go list -tags with_sing_tun -deps ./main > "$RUNNER_TEMP/native-deps.txt"
+          if grep -Fx 'github.com/xtls/xray-core/proxy/socks_uds' "$RUNNER_TEMP/default-deps.txt" "$RUNNER_TEMP/native-deps.txt"; then
+            echo 'Retired SOCKS-over-UDS extension is still linked'
+            exit 1
+          fi
       - name: Native CLI build
         shell: bash
         run: go build -tags with_sing_tun -trimpath -o native-xray${{ runner.os == 'Windows' && '.exe' || '' }} ./main
