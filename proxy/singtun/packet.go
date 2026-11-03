@@ -3,7 +3,11 @@
 package singtun
 
 import (
+	"context"
+	goerrors "errors"
+	"io"
 	"net"
+	"os"
 	"sync"
 
 	sbuf "github.com/sagernet/sing/common/buf"
@@ -13,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
 )
 
 // packetConn adapts packet ownership and addressing, without a socket or pipe.
@@ -27,6 +32,11 @@ type packetConn struct {
 	headroom    int
 	maxBorrowed int
 	writeMu     sync.Mutex
+	// The existing write lock orders the initial reply against outbound failure.
+	// An upstream reply must never race a rejection of its original request.
+	handshakeDone bool
+	outboundError error
+	errorContext  context.Context
 	// Most Xray packet writers submit one datagram at a time. Reuse only this
 	// small slice backing storage; larger batches allocate bounded scratch.
 	writePacket      [1]*sbuf.Buffer
@@ -83,6 +93,18 @@ func (c *packetConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	defer buf.ReleaseMulti(mb)
+	if c.outboundError != nil {
+		return c.outboundError
+	}
+	if !c.handshakeDone && !mb.IsEmpty() {
+		// Receiving upstream data establishes the outbound, before local delivery.
+		// Match Sing's handshake contract and retain the original batch writes.
+		c.handshakeDone = true
+		if err := N.ReportHandshakeSuccess(c.PacketConn); err != nil {
+			c.outboundError = err
+			return err
+		}
+	}
 	for len(mb) > 0 {
 		count := min(len(mb), 16)
 		var err error
@@ -99,6 +121,41 @@ func (c *packetConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
 		mb = mb[count:]
 	}
 	return nil
+}
+
+// SubmitError receives Xray's existing outbound error feedback. Only an initial
+// failure reports Sing's retained request snapshot; ordinary shutdown and errors
+// after a successful reply must not generate an ICMP rejection.
+func (c *packetConn) SubmitError(err error) {
+	if err == nil {
+		return
+	}
+	c.writeMu.Lock()
+	if c.outboundError == nil {
+		c.outboundError = err
+	}
+	if !c.handshakeDone {
+		c.handshakeDone = true
+		closed := goerrors.Is(err, io.EOF) || goerrors.Is(err, io.ErrClosedPipe) ||
+			goerrors.Is(err, net.ErrClosed) || goerrors.Is(err, os.ErrClosed) ||
+			goerrors.Is(err, context.Canceled)
+		if !closed && (c.errorContext == nil || c.errorContext.Err() == nil) {
+			// ICMP delivery is secondary; retain the authoritative outbound error.
+			_ = N.ReportHandshakeFailure(c.PacketConn, err)
+		}
+	}
+	c.writeMu.Unlock()
+	// Preserve an originator's existing tracker, outside our IO lock: it may
+	// cancel the flow or perform its own cleanup in response to this callback.
+	if c.errorContext != nil {
+		session.SubmitOutboundErrorToOriginator(c.errorContext, err)
+	}
+}
+
+func (c *packetConn) dispatchError() error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.outboundError
 }
 
 func (c *packetConn) writePackets(mb buf.MultiBuffer, packets []*sbuf.Buffer, destinations []M.Socksaddr) error {

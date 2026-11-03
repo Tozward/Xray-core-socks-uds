@@ -719,7 +719,7 @@ func benchmarkTimevalSeconds(value unix.Timeval) float64 {
 	return float64(value.Sec) + float64(value.Usec)/1e6
 }
 
-func benchmarkKernelStack(b *testing.B, name string, ip4, ip6 netip.Addr, mtu int, config *Config, parent context.Context, handler stun.Handler, gate *flowHandler) {
+func benchmarkKernelStack(b testing.TB, name string, ip4, ip6 netip.Addr, mtu int, config *Config, parent context.Context, handler stun.Handler, gate *flowHandler) {
 	b.Helper()
 	options := stun.Options{
 		Name: name, MTU: uint32(mtu), DNSMode: stun.DNSModeDisabled, EXP_ExternalConfiguration: true, Logger: logger.NOP(),
@@ -742,7 +742,6 @@ func benchmarkKernelStack(b *testing.B, name string, ip4, ip6 netip.Addr, mtu in
 		if stack != nil {
 			_ = stack.Close()
 		}
-		gate.wg.Wait()
 		_ = device.Close()
 	}
 	b.Cleanup(cleanup)
@@ -934,7 +933,6 @@ func (h *kernelBenchmarkNative) NewConnectionEx(ctx context.Context, conn net.Co
 		rejectConnection(conn, onClose)
 		return
 	}
-	defer h.wg.Done()
 	err := N.ReportHandshakeSuccess(conn)
 	if err == nil {
 		native, ok := conn.(*stun.GoConn)
@@ -1050,7 +1048,6 @@ func (h *kernelBenchmarkSOCKS) NewConnectionEx(ctx context.Context, conn net.Con
 			if onClose != nil {
 				onClose(err)
 			}
-			h.wg.Done()
 		})
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

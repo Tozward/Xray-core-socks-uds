@@ -17,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/proxy/tun"
@@ -125,7 +126,6 @@ func (h *Handler) startDevice(device stun.Tun, options stun.Options) (*stackSess
 		if stack != nil {
 			_ = stack.Close()
 		}
-		flows.wg.Wait()
 		_ = device.Close()
 		return nil, errors.New("sing-tun: start stack").Base(err)
 	}
@@ -147,7 +147,9 @@ func (h *Handler) Close() error {
 	run.flows.stop()
 	run.cancel()
 	err := run.stack.Close()
-	run.flows.wg.Wait()
+	// Stack.Close joins its IO engines and closes native flows before the device.
+	// DispatchLink belongs to Xray: waiting for it here can prevent Core.Close
+	// from reaching an outbound whose Close is needed to release that dispatch.
 	return errors.Combine(err, run.device.Close())
 }
 
@@ -162,17 +164,12 @@ type flowHandler struct {
 	mtu    int
 	mu     sync.Mutex
 	closed bool
-	wg     sync.WaitGroup
 }
 
 func (h *flowHandler) begin() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.closed {
-		return false
-	}
-	h.wg.Add(1)
-	return true
+	return !h.closed
 }
 
 func (h *flowHandler) stop() {
@@ -199,7 +196,6 @@ func (h *flowHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source
 		rejectConnection(conn, onClose)
 		return
 	}
-	defer h.wg.Done()
 	// Match Xray TUN's accepted connection semantics. In particular, sniffing
 	// must be able to read the client's data after its TCP handshake completes.
 	err := N.ReportHandshakeSuccess(conn)
@@ -226,10 +222,15 @@ func (h *flowHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketCo
 		rejectConnection(conn, onClose)
 		return
 	}
-	defer h.wg.Done()
 	packetConn, err := newPacketConn(conn, source, destination, h.mtu)
 	if err == nil {
+		packetConn.errorContext = ctx
+		ctx = session.TrackedConnectionError(ctx, packetConn)
 		h.native.HandleConnectionContext(ctx, packetConn, packetConn.destination)
+		err = packetConn.dispatchError()
+		if err == nil {
+			err = ctx.Err()
+		}
 	} else {
 		_ = conn.Close()
 	}
