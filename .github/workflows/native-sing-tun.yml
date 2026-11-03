@@ -78,13 +78,14 @@ jobs:
         run: |
           go test -race -tags with_sing_tun -c ./proxy/singtun -o native-tun-test
           sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 ./native-tun-test -test.v -test.run '^TestNativeKernel' -test.count=3 -test.timeout=3m
-      - name: REALITY and native first requests with stock preconnect enabled
+      - name: REALITY, fragmented Vision and stock preconnect protocol controls
         if: runner.os == 'Linux'
         run: |
-          # Stock VLESS Close/send races under -race; exercise this existing
-          # preconnection implementation separately without changing it here.
+          # Stock VLESS Close/send and Vision's shared filter counter race.
+          # Adapter/domain-routing race checks still run in the preceding step;
+          # keep these genuine upstream protocol controls mandatory separately.
           go test -tags with_sing_tun -c ./proxy/singtun -o native-preconnect-test
-          sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 XRAY_NATIVE_TEST_TESTPRE=1 ./native-preconnect-test -test.v -test.run '^(TestVisionRealityTestpreFirstSmallRequestsOverMemoryTun|TestNativeKernelVisionTestpreFirstSmallRequests)$' -test.count=3 -test.timeout=3m
+          sudo env XRAY_REQUIRE_NATIVE_TUN_TESTS=1 XRAY_NATIVE_TEST_TESTPRE=1 XRAY_NATIVE_VISION_PROTOCOL_TESTS=1 ./native-preconnect-test -test.v -test.run '^(TestVisionRealityTestpreFirstSmallRequestsOverMemoryTun|TestNativeKernelVisionTestpreFirstSmallRequests|TestVisionKernelLargeClientHelloDomainRoute)$' -test.count=3 -test.timeout=3m
       - name: Checkout APK-pinned HEV for comparison
         if: runner.os == 'Linux'
         uses: actions/checkout@v7

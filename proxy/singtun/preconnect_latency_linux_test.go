@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"regexp"
 	"runtime"
@@ -72,8 +73,21 @@ func TestNativeKernelPreconnectLatencyStudy(t *testing.T) {
 }
 
 // The fallback deliberately rejects traffic: an application response requires
-// the sniffed TLS domain to select the real Vision outbound, not just byte IO.
+// the sniffed TLS domain to select the allowed outbound, not just byte IO.
 func TestNativeKernelLargeClientHelloDomainRoute(t *testing.T) {
+	for _, path := range []string{"official_stack", "native_bidirectional_jumbo"} {
+		t.Run(path, func(t *testing.T) {
+			preconnectLatencyCase(t, path, "large_fragmented", "freedom", 0, 0, true)
+		})
+	}
+}
+
+// Keep the real Vision protocol control separate from adapter race checks:
+// stock Vision shares filter state between its two forwarding tasks.
+func TestVisionKernelLargeClientHelloDomainRoute(t *testing.T) {
+	if os.Getenv("XRAY_NATIVE_VISION_PROTOCOL_TESTS") != "1" {
+		t.Skip("opt-in non-race protocol control for stock Vision filter state")
+	}
 	for _, path := range []string{"official_stack", "native_bidirectional_jumbo"} {
 		t.Run(path, func(t *testing.T) {
 			preconnectLatencyCase(t, path, "large_fragmented", "tls13", 0, 0, true)
@@ -84,26 +98,40 @@ func TestNativeKernelLargeClientHelloDomainRoute(t *testing.T) {
 func preconnectLatencyCase(t *testing.T, path, hello, outer string, testpre uint32, delay time.Duration, domainRoute bool) {
 	t.Helper()
 	var fixture *visionFixture
-	if outer == "reality" {
-		fixture = realityVisionCoreConfig(t, testpre)
+	var err error
+	relay := &preconnectRelay{}
+	if outer == "freedom" {
+		ca, _, _, cert, key := visionCertificates(t)
+		port, clientTLS, results := visionTLSApplication(t, ca, cert, key)
+		config := memoryCoreConfig(nil)
+		config.Outbound = config.Outbound[:1]
+		config.Outbound[0].Tag = visionOutboundTag
+		fixture = &visionFixture{
+			Config: config, ClientTLS: clientTLS, ServerResults: results,
+			Target: netip.AddrPortFrom(netip.MustParseAddr("192.0.2.90"), uint16(port)),
+		}
 	} else {
-		fixture = visionCoreConfig(t)
+		if outer == "reality" {
+			fixture = realityVisionCoreConfig(t, testpre)
+		} else {
+			fixture = visionCoreConfig(t)
+		}
+		outbound := fixture.Config.Outbound[0]
+		message, err := outbound.ProxySettings.GetInstance()
+		if err != nil {
+			t.Fatal(err)
+		}
+		proxyConfig := message.(*vlessout.Config)
+		account, err := proxyConfig.Vnext.User.Account.GetInstance()
+		if err != nil {
+			t.Fatal(err)
+		}
+		account.(*vless.Account).Testpre = testpre
+		proxyConfig.Vnext.User.Account = serial.ToTypedMessage(account)
+		relay = preconnectDelayRelay(t, int(proxyConfig.Vnext.Port), delay)
+		proxyConfig.Vnext.Port = uint32(relay.port)
+		outbound.ProxySettings = serial.ToTypedMessage(proxyConfig)
 	}
-	outbound := fixture.Config.Outbound[0]
-	message, err := outbound.ProxySettings.GetInstance()
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxyConfig := message.(*vlessout.Config)
-	account, err := proxyConfig.Vnext.User.Account.GetInstance()
-	if err != nil {
-		t.Fatal(err)
-	}
-	account.(*vless.Account).Testpre = testpre
-	proxyConfig.Vnext.User.Account = serial.ToTypedMessage(account)
-	relay := preconnectDelayRelay(t, int(proxyConfig.Vnext.Port), delay)
-	proxyConfig.Vnext.Port = uint32(relay.port)
-	outbound.ProxySettings = serial.ToTypedMessage(proxyConfig)
 	if domainRoute {
 		fixture.Config.Outbound = append([]*core.OutboundHandlerConfig{{
 			Tag: "unmatched-domain", ProxySettings: serial.ToTypedMessage(&blackhole.Config{}),

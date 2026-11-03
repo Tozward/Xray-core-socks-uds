@@ -191,3 +191,10 @@ resource bounds, remaining limitations and upstream-first retirement condition.
 The Sing dependency and all discarded adapter/buffer prototypes remain unchanged.
 The proposal patch is retained only as historical review material; executable
 source and tests are authoritative after this integration.
+
+The later CI validation separates the fragmented domain-routing component
+check (verified TLS/direct outbound, still mandatory with race detection) from
+the additional genuine Vision protocol control (mandatory without race).
+The compatibility ledger records the unchanged Vision counter race exposed
+by the initial CI job. This test-only distinction leaves the approved five-line
+production correction and all preconnection/forwarding algorithms unchanged.

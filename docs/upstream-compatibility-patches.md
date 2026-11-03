@@ -55,3 +55,20 @@ replacement revision. Do not preserve a patch solely because it was once needed.
 
 The dependency's separate ST-FD/ST-API/ST-PERF ledger remains owned by the
 sing-tun fork. XR-COMPAT-001 introduces no new dependency patch.
+
+### Validation gate refinement
+
+The first Linux CI run41662649266 exposed a race on the unchanged Vision
+NumberOfPacketToFilter field in the synthetic node's two forwarding tasks:
+XtlsFilterTls writes while VisionReader reads. These accesses match upstream7c;
+the bounded TLS classification does not modify that state. The initial failing
+job is retained as evidence and is not reported as a passing race check.
+
+The mandatory domain-routing race regression now uses verified inner TLS over
+the direct outbound, retaining the same fragmented ClientHello, rejecting
+fallback, original-stack control and actual native bidirectional handoffs.
+The additional TestVisionKernelLargeClientHelloDomainRoute runs the genuine
+Vision path in the separately mandatory non-race protocol step alongside the
+existing stock-preconnect controls. Existing adapter, cache, ownership and
+native IO race tests remain enabled. This boundary does not certify upstream
+Vision filter state as race-free and does not introduce a production workaround.
